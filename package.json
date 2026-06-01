@@ -1,0 +1,16 @@
+{
+  "name": "monitor.tui",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.3.1",
+    "valibot": "^1.4.1"
+  }
+}
