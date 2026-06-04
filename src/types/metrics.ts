@@ -20,6 +20,13 @@ export const Timestamp = Brand.refined<Timestamp>(
   (n) => Brand.error(`Expected a non-negative integer epoch ms, got ${n}`),
 );
 
+/** A non-negative quantity of bytes. */
+export type Bytes = number & Brand.Brand<"Bytes">;
+export const Bytes = Brand.refined<Bytes>(
+  (n) => Number.isFinite(n) && n >= 0,
+  (n) => Brand.error(`Expected a non-negative byte count, got ${n}`),
+);
+
 /**
  * Aggregate CPU usage at a point in time. `user + system + idle` should sum to
  * ~100; we keep the components separately so the UI can break them down.
@@ -33,10 +40,23 @@ export interface CpuSnapshot {
 }
 
 /**
- * Discriminated union of all metric snapshots, keyed by `_tag`. New collectors
- * add a member here (e.g. `MemorySnapshot`, `DiskSnapshot`).
+ * Physical memory usage at a point in time. `usedBytes` follows Activity
+ * Monitor's "Memory Used" (active + wired + compressed); `usedPercent` is
+ * `usedBytes / totalBytes`.
  */
-export type MetricSnapshot = CpuSnapshot;
+export interface MemorySnapshot {
+  readonly _tag: "memory";
+  readonly at: Timestamp;
+  readonly usedPercent: Percent;
+  readonly usedBytes: Bytes;
+  readonly totalBytes: Bytes;
+}
+
+/**
+ * Discriminated union of all metric snapshots, keyed by `_tag`. New collectors
+ * add a member here (e.g. `DiskSnapshot`, `NetworkSnapshot`).
+ */
+export type MetricSnapshot = CpuSnapshot | MemorySnapshot;
 
 /** The `_tag` of any metric snapshot — used as the key into the MetricsStore. */
 export type MetricTag = MetricSnapshot["_tag"];

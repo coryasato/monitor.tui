@@ -4,6 +4,7 @@ import { CpuCollector } from "../services/cpu-collector.ts";
 import { CollectorError } from "../types/errors.ts";
 import { Percent, Timestamp, type CpuSnapshot } from "../types/metrics.ts";
 import { collectorStream } from "./collector-stream.ts";
+import { spawnText } from "./spawn.ts";
 
 /**
  * macOS CPU collector. macOS has no `/proc`, so we shell out to `top` and parse
@@ -58,32 +59,9 @@ const RawCpuUsageSchema = v.object({
   idle: v.pipe(v.number(), v.finite(), v.minValue(0), v.maxValue(100)),
 });
 
-/**
- * Run `top -l 2 -n 0` and return its stdout. Spawned via `Bun.spawn` (not
- * `Bun.$`) so we can hook the abort signal `Effect.tryPromise` provides on
- * interruption: when the fiber is interrupted (e.g. Ctrl+C) mid-sample, we kill
- * the subprocess instead of leaving an orphaned `top` running.
- */
-const runTop: Effect.Effect<string, CollectorError> = Effect.tryPromise({
-  try: (signal) => {
-    const proc = Bun.spawn(["top", "-l", "2", "-n", "0"], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    signal.addEventListener("abort", () => proc.kill(), { once: true });
-    return new Response(proc.stdout).text();
-  },
-  catch: (cause) =>
-    new CollectorError({
-      collector: COLLECTOR,
-      reason: "failed to run `top`",
-      cause,
-    }),
-});
-
 /** One CPU reading: run `top`, parse, validate at the boundary, then brand. */
 const read: Effect.Effect<CpuSnapshot, CollectorError> = Effect.gen(function* () {
-  const raw = yield* runTop;
+  const raw = yield* spawnText(["top", "-l", "2", "-n", "0"], COLLECTOR);
 
   const parsed = parseCpuUsage(raw);
   if (parsed === null) {

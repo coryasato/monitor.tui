@@ -2,12 +2,15 @@ import { BunRuntime } from "@effect/platform-bun";
 import { createCliRenderer } from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
 import { CpuCollectorMacOSLive } from "../collectors/cpu-macos.ts";
+import { MemoryCollectorMacOSLive } from "../collectors/memory-macos.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
+import { MemoryCollector } from "../services/memory-collector.ts";
 import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
 import { RenderError } from "../types/errors.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
 import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
-import type { MetricState } from "../types/metrics.ts";
+import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
+import type { MetricState, MetricTag } from "../types/metrics.ts";
 
 /**
  * A stable signature for a state: identical signatures mean nothing visible
@@ -43,46 +46,74 @@ const acquireRenderer = Effect.acquireRelease(
 const program = Effect.gen(function* () {
   const store = yield* MetricsStore;
   const cpu = yield* CpuCollector;
+  const memory = yield* MemoryCollector;
 
   const renderer = yield* acquireRenderer;
-  const gauge = makeCpuGauge(renderer);
+  const cpuGauge = makeCpuGauge(renderer);
   const sparkline = makeCpuSparkline(renderer);
-  renderer.root.add(gauge.root);
+  const memGauge = makeMemoryGauge(renderer);
+  renderer.root.add(cpuGauge.root);
   renderer.root.add(sparkline.root);
+  renderer.root.add(memGauge.root);
 
-  // Collector fiber: drain the stream into the store. Scope-bound, so it is
-  // interrupted automatically on shutdown.
+  // One independent collector fiber per source. Because each stream recovers its
+  // own errors into `unavailable`, a failure in one never affects the others.
   yield* cpu.stream.pipe(
     Stream.runForEach((state) => store.set(state)),
     Effect.forkScoped,
   );
+  yield* memory.stream.pipe(
+    Stream.runForEach((state) => store.set(state)),
+    Effect.forkScoped,
+  );
 
-  // Render-tick fiber: pull the latest state and update the views only when the
-  // sample actually changed (redraw-on-change), then request a single repaint.
+  // Each panel binds a store tag to the views it drives.
+  const panels: ReadonlyArray<{
+    readonly tag: MetricTag;
+    readonly apply: (state: Option.Option<MetricState>) => void;
+  }> = [
+    {
+      tag: "cpu",
+      apply: (state) => {
+        cpuGauge.update(state);
+        sparkline.push(state);
+      },
+    },
+    { tag: "memory", apply: (state) => memGauge.update(state) },
+  ];
+
+  // Render-tick fiber: for each panel, read its latest state and re-apply only
+  // when the sample changed (redraw-on-change), then request a single repaint.
   // A RenderError degrades to a debug line instead of crashing the loop.
-  let lastSignature: string | null = null;
-  yield* store.get("cpu").pipe(
-    Effect.flatMap((state) =>
+  const lastSignature = new Map<MetricTag, string>();
+  yield* Effect.forEach(panels, (panel) =>
+    store
+      .get(panel.tag)
+      .pipe(Effect.map((state) => ({ panel, state }))),
+  ).pipe(
+    Effect.flatMap((entries) =>
       Effect.try({
         try: () => {
-          const signature = signatureOf(state);
-          if (signature === lastSignature) return;
-          lastSignature = signature;
-          gauge.update(state);
-          sparkline.push(state);
-          // Content changed; ask for one repaint (throttled by maxFps).
-          renderer.requestRender();
+          let dirty = false;
+          for (const { panel, state } of entries) {
+            const signature = signatureOf(state);
+            if (lastSignature.get(panel.tag) === signature) continue;
+            lastSignature.set(panel.tag, signature);
+            panel.apply(state);
+            dirty = true;
+          }
+          if (dirty) renderer.requestRender();
         },
         catch: (cause) =>
           new RenderError({
-            component: "cpu-view",
+            component: "render-tick",
             reason: cause instanceof Error ? cause.message : String(cause),
             cause,
           }),
       }),
     ),
     Effect.catchTag("RenderError", (error) =>
-      Effect.sync(() => gauge.showDebug(`render error: ${error.reason}`)),
+      Effect.sync(() => cpuGauge.showDebug(`render error: ${error.reason}`)),
     ),
     Effect.repeat(Schedule.spaced(Duration.millis(250))),
     Effect.forkScoped,
@@ -101,6 +132,10 @@ const program = Effect.gen(function* () {
   });
 });
 
-const AppLive = Layer.merge(MetricsStoreLive, CpuCollectorMacOSLive);
+const AppLive = Layer.mergeAll(
+  MetricsStoreLive,
+  CpuCollectorMacOSLive,
+  MemoryCollectorMacOSLive,
+);
 
 BunRuntime.runMain(Effect.scoped(Effect.provide(program, AppLive)));

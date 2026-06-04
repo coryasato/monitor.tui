@@ -28,11 +28,13 @@ const program = Effect.gen(function* () {
       Option.match(state, {
         onNone: () => Effect.log("cpu: (waiting for first reading…)"),
         onSome: (s) =>
-          s._tag === "ok"
+          s._tag === "ok" && s.snapshot._tag === "cpu"
             ? Effect.log(
                 `cpu: user ${s.snapshot.user}%  sys ${s.snapshot.system}%  idle ${s.snapshot.idle}%`,
               )
-            : Effect.log(`cpu: unavailable (${s.reason})`),
+            : s._tag === "unavailable"
+              ? Effect.log(`cpu: unavailable (${s.reason})`)
+              : Effect.void,
       }),
     ),
     Effect.repeat(Schedule.spaced(Duration.seconds(1))),

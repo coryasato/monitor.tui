@@ -80,7 +80,7 @@ describe("collectorStream", () => {
       if (head._tag !== "Some") return;
       const state = head.value;
       expect(state._tag).toBe("ok");
-      if (state._tag !== "ok") return;
+      if (state._tag !== "ok" || state.snapshot._tag !== "cpu") return;
       const { user, system, idle } = state.snapshot;
       for (const p of [user, system, idle]) {
         expect(p).toBeGreaterThanOrEqual(0);

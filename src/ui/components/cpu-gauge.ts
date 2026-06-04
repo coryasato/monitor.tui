@@ -85,15 +85,17 @@ export function makeCpuGauge(renderer: CliRenderer): CpuGauge {
         bar.fg = "#50FA7B";
       },
       onSome: (s) => {
-        if (s._tag === "unavailable") {
-          value.content = `unavailable (${s.reason})`;
+        if (s._tag === "unavailable" || s.snapshot._tag !== "cpu") {
+          value.content =
+            s._tag === "unavailable" ? `unavailable (${s.reason})` : "unavailable";
           value.fg = "#FF5555";
           bar.content = renderBar(0);
           bar.fg = "#6272A4";
           return;
         }
-        const used = clampPercent(s.snapshot.user + s.snapshot.system);
-        value.content = `user ${fmt(s.snapshot.user)}%   sys ${fmt(s.snapshot.system)}%   idle ${fmt(s.snapshot.idle)}%`;
+        const snap = s.snapshot;
+        const used = clampPercent(snap.user + snap.system);
+        value.content = `user ${fmt(snap.user)}%   sys ${fmt(snap.system)}%   idle ${fmt(snap.idle)}%`;
         value.fg = "#F8F8F2";
         bar.content = `${renderBar(used)} ${fmt(used)}%`;
         bar.fg = loadColor(used);

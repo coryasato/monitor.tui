@@ -112,7 +112,10 @@ on change.
 
 ## Phase 5+ — Next collectors (named, not specced)
 Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → component):
-1. **Memory** via `vm_stat` / `sysctl`.
+1. ✅ **Memory** via `vm_stat` / `sysctl` — DONE. Added `Bytes` brand,
+   `MemorySnapshot`, `MemoryCollector` + macOS Layer, `MemoryGauge`. Extracted the
+   shared `spawnText` helper (`src/collectors/spawn.ts`) and generalized `main.ts`'s
+   render tick to a list of panels. The store is now genuinely multi-tag.
 2. **Config loading** (`ConfigError`, Valibot-validated file + CLI flags).
 3. **Disk / Network** via `iostat` / `netstat`.
 4. **Docker** containers (once the daemon is available).
@@ -190,7 +193,35 @@ collector + per-core bars, reusing collectorStream and the existing patterns."*
 ---
 
 ## Verification
-- **Per phase:** `bun run typecheck` (`tsc --noEmit`) and `bun test` stay green.
-- **Phase 1:** scratch program prints a plausible CPU % matching Activity Monitor.
-- **Phase 2:** value changes on the interval; Ctrl+C exits clean, no orphaned fiber.
-- **Phase 3+:** `bun src/app/main.ts` shows a live gauge vs Activity Monitor.
+
+**Every phase:** `bun run typecheck` (`tsc --noEmit`) and `bun test` stay green.
+
+**TUI smoke test (needs a real PTY).** Piping the TUI to a non-TTY shows only the
+first frame, so drive it through a pty and capture the output:
+
+```sh
+script -q /tmp/tui.out timeout -s INT --preserve-status 10 bun src/app/main.ts >/dev/null 2>/tmp/tui.err
+# then assert against /tmp/tui.out (rendered frames) and /tmp/tui.err (should be empty)
+```
+
+After it exits, confirm no collector subprocess was orphaned by interruption:
+
+```sh
+pgrep -fl "top -l 2|vm_stat|hw.memsize" || echo "NONE — clean"
+```
+
+**Quitting:** press `q` for a clean shutdown (renderer destroyed, fibers
+interrupted). The harness `timeout -s INT` above also exits cleanly via
+BunRuntime's signal handling. In-terminal **Ctrl+C does not quit yet** — see Bugs.
+
+**Per-phase checks:**
+- **Phase 1:** scratch program (`bun src/app/cpu-demo.ts`) prints a plausible CPU %
+  matching Activity Monitor.
+- **Phase 2:** `bun src/app/stream-demo.ts` — value changes on the interval; clean
+  exit, no orphaned subprocess.
+- **Phase 3:** live CPU gauge renders real readings (grep `idle` in the pty capture).
+- **Phase 4:** History panel renders; sparkline glyphs (`▁`–`█`) appear and scroll;
+  redraws only on sample change.
+- **Phase 5 (memory):** both `CPU` and `MEM` panels render; memory shows `GiB` and
+  ≈ Activity Monitor's "Memory Used"; one collector going `unavailable` leaves the
+  other updating (cross-tag isolation).

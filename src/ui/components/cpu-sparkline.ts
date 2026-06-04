@@ -46,7 +46,9 @@ const usedOf = (state: Option.Option<MetricState>): number | null =>
   Option.match(state, {
     onNone: () => null,
     onSome: (s) =>
-      s._tag === "ok" ? clampPercent(s.snapshot.user + s.snapshot.system) : null,
+      s._tag === "ok" && s.snapshot._tag === "cpu"
+        ? clampPercent(s.snapshot.user + s.snapshot.system)
+        : null,
   });
 
 export interface CpuSparkline {

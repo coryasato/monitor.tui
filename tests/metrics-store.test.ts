@@ -74,4 +74,28 @@ describe("MetricsStore", () => {
     expect(HashMap.size(after)).toBe(1);
     expect(HashMap.get(after, "cpu")).toEqual(Option.some(okState));
   });
+
+  test("keeps tags independent: one unavailable does not affect another", async () => {
+    // The graceful-degradation guarantee at the store level: a failing memory
+    // collector marks only "memory" unavailable; "cpu" stays ok.
+    const memoryDown: MetricState = {
+      _tag: "unavailable",
+      tag: "memory",
+      at: Timestamp(3000),
+      reason: "vm_stat failed",
+    };
+    const { cpu, memory } = await withStore(
+      Effect.gen(function* () {
+        const store = yield* MetricsStore;
+        yield* store.set(okState); // cpu ok
+        yield* store.set(memoryDown); // memory unavailable
+        return {
+          cpu: yield* store.get("cpu"),
+          memory: yield* store.get("memory"),
+        };
+      }),
+    );
+    expect(cpu).toEqual(Option.some(okState));
+    expect(memory).toEqual(Option.some(memoryDown));
+  });
 });
