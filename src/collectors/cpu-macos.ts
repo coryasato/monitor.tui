@@ -1,13 +1,9 @@
-import { Duration, Effect, Layer, Schedule, Stream } from "effect";
+import { Duration, Effect, Layer } from "effect";
 import * as v from "valibot";
 import { CpuCollector } from "../services/cpu-collector.ts";
 import { CollectorError } from "../types/errors.ts";
-import {
-  Percent,
-  Timestamp,
-  type CpuSnapshot,
-  type MetricState,
-} from "../types/metrics.ts";
+import { Percent, Timestamp, type CpuSnapshot } from "../types/metrics.ts";
+import { collectorStream } from "./collector-stream.ts";
 
 /**
  * macOS CPU collector. macOS has no `/proc`, so we shell out to `top` and parse
@@ -119,33 +115,12 @@ const read: Effect.Effect<CpuSnapshot, CollectorError> = Effect.gen(function* ()
 /** Extra gap between samples. `top -l 2` already blocks ~1s for its own delta. */
 const POLL_GAP = Duration.millis(500);
 
-const toOk = (snapshot: CpuSnapshot): MetricState => ({
-  _tag: "ok",
-  tag: "cpu",
-  at: snapshot.at,
-  snapshot,
-});
-
-const toUnavailable = (reason: string): MetricState => ({
-  _tag: "unavailable",
-  tag: "cpu",
-  at: Timestamp(Date.now()),
-  reason,
-});
-
 /**
- * Continuous CPU stream. Each tick runs {@link read}; a `CollectorError` is
- * caught and converted to an `unavailable` state so the stream keeps running
- * (graceful degradation). The collector owns its own cadence via `Schedule`.
+ * Continuous CPU stream built from {@link read}: successes become `ok` states,
+ * recoverable errors become `unavailable` states, and polling continues either
+ * way. The ok/unavailable mapping + cadence live in {@link collectorStream}.
  */
-const stream: Stream.Stream<MetricState> = Stream.repeatEffect(
-  read.pipe(
-    Effect.map(toOk),
-    Effect.catchTag("CollectorError", (error) =>
-      Effect.succeed(toUnavailable(error.reason)),
-    ),
-  ),
-).pipe(Stream.schedule(Schedule.spaced(POLL_GAP)));
+const stream = collectorStream("cpu", read, POLL_GAP);
 
 /** Live macOS implementation of {@link CpuCollector}. */
 export const CpuCollectorMacOSLive = Layer.succeed(

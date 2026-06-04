@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Effect, Option } from "effect";
+import { Effect, HashMap, Option } from "effect";
 import {
   MetricsStore,
   MetricsStoreLive,
@@ -58,5 +58,20 @@ describe("MetricsStore", () => {
       }),
     );
     expect(result).toEqual(Option.some(unavailable));
+  });
+
+  test("getAll is empty initially and reflects recorded states", async () => {
+    const { before, after } = await withStore(
+      Effect.gen(function* () {
+        const store = yield* MetricsStore;
+        const before = yield* store.getAll;
+        yield* store.set(okState);
+        const after = yield* store.getAll;
+        return { before, after };
+      }),
+    );
+    expect(HashMap.size(before)).toBe(0);
+    expect(HashMap.size(after)).toBe(1);
+    expect(HashMap.get(after, "cpu")).toEqual(Option.some(okState));
   });
 });
