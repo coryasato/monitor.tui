@@ -20,21 +20,21 @@ Layer + Stream from Phase 1*.
 
 ---
 
-## Phase 0 — Foundation ✅ (in progress)
+## Phase 0 — Foundation ✅ DONE
 **Goal:** project skeleton, dependencies, shared types compile.
 
 - [x] `bun add effect`.
-- [ ] Create `/src` tree (`services`, `collectors`, `ui`, `app`, `types`).
-- [ ] `/src/types/errors.ts` — error taxonomy as `Data.TaggedError`:
+- [x] Create `/src` tree (`services`, `collectors`, `ui`, `app`, `types`).
+- [x] `/src/types/errors.ts` — error taxonomy as `Data.TaggedError`:
   `CollectorError` (recoverable), `ConfigError` (fatal), `RenderError` (degrade).
-- [ ] `/src/types/metrics.ts` — `MetricSnapshot` value type + branded types
+- [x] `/src/types/metrics.ts` — `MetricSnapshot` value type + branded types
   (`Percent`, `Timestamp`). Discriminated union keyed by `_tag`.
 
-**Milestone:** `bun run typecheck` passes; `bun index.ts` still renders.
+**Milestone:** `bun run typecheck` passes; `bun index.ts` still renders. ✅
 
 ---
 
-## Phase 1 — CPU collector (the Effect core lesson)
+## Phase 1 — CPU collector (the Effect core lesson) ✅ DONE
 **Goal:** read real CPU usage once, through a Service + Layer, with typed errors.
 
 - `/src/services/cpu-collector.ts` — `CpuCollector` `Context.Tag`; `read: Effect<CpuSnapshot, CollectorError>`.
@@ -49,8 +49,13 @@ Layer + Stream from Phase 1*.
 
 ---
 
-## Phase 2 — Streaming + MetricsStore
+## Phase 2 — Streaming + MetricsStore ✅ DONE
 **Goal:** continuous, cancellable, resource-managed metric flow.
+
+> Implemented: recovery/cadence logic extracted into the reusable
+> `src/collectors/collector-stream.ts` (`collectorStream(tag, read, gap)`), which
+> every future collector should reuse. `top` is spawned via `Bun.spawn` and killed
+> on the interrupt `AbortSignal` so SIGINT leaves no orphaned subprocess.
 
 - `read` → `Stream<CpuSnapshot, CollectorError>` (`Stream.repeatEffect` + `Schedule`).
   Collector owns interval + recovery (`catchTag` → "unavailable" snapshot, keep going).
@@ -62,23 +67,46 @@ Layer + Stream from Phase 1*.
 
 ---
 
-## Phase 3 — TUI wiring (vanilla OpenTUI)
+## Phase 3 — TUI wiring (vanilla OpenTUI) ✅ DONE
 **Goal:** live CPU gauge on screen, pull-based reads.
 
-- `/src/app/main.ts` — `BunRuntime.runMain`, compose Layers, start renderer
-  (reuse `createCliRenderer` config from `index.ts`).
-- `/src/ui/components/` — CPU gauge (% text + bar); read latest snapshot from
-  `MetricsStore` each render tick (never push fiber→component).
-- `RenderError` → log to a debug line, never crash the loop.
+- `/src/app/main.ts` — `BunRuntime.runMain`, compose Layers, start renderer.
+- `/src/ui/components/cpu-gauge.ts` — CPU gauge (% text + colored bar); read latest
+  snapshot from `MetricsStore` each render tick (never push fiber→component).
+- `RenderError` → debug line via `gauge.showDebug`, never crash the loop.
 
-**Milestone:** a live, updating CPU gauge in the terminal.
+**Milestone:** a live, updating CPU gauge in the terminal. ✅
+
+> Notes for later: (1) mutating renderable `.content` does **not** auto-repaint —
+> `main.ts` calls `renderer.requestRender()` each tick; (2) verifying a TUI needs a
+> real PTY (`script -q out.txt timeout -s INT --preserve-status 8 bun src/app/main.ts`),
+> piping to a non-TTY only shows the first frame; (3) component tests use
+> `@opentui/core/testing` `createTestRenderer` + `captureCharFrame()`.
 
 ---
 
-## Phase 4 — Per-core + history graph
-- Per-core breakdown; rolling history ring buffer → sparkline/graph component.
+## Phase 4 — CPU history graph (rescoped) ✅ DONE
+**Goal:** a scrolling sparkline of recent CPU load beneath the gauge.
 
-**Milestone:** per-core bars + a scrolling CPU history graph.
+> **Scope decision (2026-06-03):** per-core was dropped from this phase. macOS
+> exposes **no** per-core CPU% via unprivileged CLI (`top`, `iostat -c`, `ps` all
+> give aggregate only). Per-core needs `host_processor_info` via Bun FFI or
+> `sudo powermetrics` — moved to *Future Work* below. This phase ships the history
+> graph for **aggregate** CPU, which has no such blocker.
+
+- Rolling history of recent `used` (= user + system) samples. **Decide:** keep the
+  ring buffer in the **UI component** (simplest — store stays "latest only") vs. in
+  the store. Recommended: component-owned ring buffer; the store contract stays
+  pull-based and unchanged.
+- New `src/ui/components/cpu-sparkline.ts` — render history with block glyphs
+  (`▁▂▃▄▅▆▇█`) scaled to 0–100%. `push(state)` + `render()`.
+- **Redraw-on-change optimization:** the render tick currently calls
+  `renderer.requestRender()` every tick. Change to request a render only when the
+  rendered content actually changed (compare to last-rendered value), honoring the
+  "minimize redraws" goal in CLAUDE.md.
+
+**Milestone:** a live scrolling CPU history sparkline under the gauge; redraws only
+on change.
 
 ---
 
@@ -89,6 +117,75 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
 3. **Disk / Network** via `iostat` / `netstat`.
 4. **Docker** containers (once the daemon is available).
 5. **Linux Layers** for existing collectors (proves the abstraction).
+
+---
+
+## Bugs
+
+- **Ctrl+C does not quit the app (`q` works).** `src/app/main.ts` quits via an
+  `addInputHandler` matching the raw bytes `"q"` and `"\x03"` (Ctrl+C), with
+  `exitOnCtrlC: false` and `exitSignals: []` so Effect owns the lifecycle.
+  Suspected cause: the **Kitty keyboard protocol** (`useKittyKeyboard` defaults on)
+  encodes Ctrl+C as a CSI-u escape (e.g. `\x1b[99;5u`), not a bare `\x03`, so the
+  `seq === "\x03"` check never matches; and because the terminal is in raw mode,
+  no SIGINT fires for BunRuntime to catch either. Workaround: press `q`.
+  Likely fixes (verify which): parse the key via `renderer.keyInput` and match
+  `key.ctrl && key.name === "c"` instead of raw bytes; and/or also match the CSI-u
+  sequence; and/or re-enable `exitOnCtrlC` and bridge its exit into the Effect
+  shutdown. **Status: deferred** — low impact since `q` quits cleanly.
+
+---
+
+## Future Work — Per-core CPU via Bun FFI (deferred from Phase 4)
+
+> **This note is self-contained.** A future session starts cold with only the repo
+> (code + CLAUDE.md + this file + git history) — no prior chat. Everything needed to
+> start is below; no earlier conversation context is required.
+
+**Why deferred:** macOS exposes no per-core CPU% to unprivileged CLI tools. Probed
+2026-06-03: `top -l 1` has no per-cpu lines, `iostat -c` is aggregate, `ps -o %cpu`
+is per-process. The kernel source is the Mach call `host_processor_info(...,
+PROCESSOR_CPU_LOAD_INFO, ...)`, which returns per-core cumulative tick counters
+(`CPU_STATE_USER`, `SYSTEM`, `IDLE`, `NICE`). `sudo powermetrics` also works but
+needs root every run — rejected for a daily-usable tool.
+
+**Recommended approach — compile a tiny C helper with Bun FFI `cc`** (simpler than
+marshalling Mach out-params/pointers from JS, and avoids a separate build step):
+- Use `import { cc } from "bun:ffi"` to compile inline C that calls
+  `host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &n, &info, &cnt)`,
+  writes per-core ticks into a caller-provided `uint64_t*` buffer, then
+  `vm_deallocate`s the returned array (**required — leaks otherwise**). Mach symbols
+  live in libSystem (linked automatically). Return the logical core count.
+- `host_processor_info` gives **cumulative** ticks (instantaneous), unlike
+  `top -l 2`. So the collector must diff two samples. Simplest: take two samples
+  ~250ms apart **inside one `read`** (mirrors current `read` shape) and compute
+  `busy% = (Δuser+Δsystem+Δnice) / (Δuser+Δsystem+Δnice+Δidle) * 100` per core.
+
+**Integration points (reuse existing patterns):**
+- `src/types/metrics.ts`: add `PerCoreCpuSnapshot { _tag: "cpu-cores"; at: Timestamp;
+  cores: ReadonlyArray<Percent> }` to the `MetricSnapshot` union (this auto-extends
+  `MetricTag` with `"cpu-cores"` and lets the store hold it with no store changes).
+- `src/services/cpu-cores-collector.ts`: new `Context.Tag` service (`read` + `stream`),
+  mirroring `cpu-collector.ts`.
+- `src/collectors/cpu-cores-macos.ts`: FFI layer; pure `ticksToPercents(prev, next)`
+  helper (unit-testable); validate core count with Valibot; build the stream with the
+  existing `collectorStream("cpu-cores", read, gap)` from `collector-stream.ts`.
+- `src/ui/components/cpu-cores.ts`: N horizontal bars (reuse `renderBar`/`loadColor`
+  exported from `cpu-gauge.ts`).
+- `src/app/main.ts`: merge the new Layer, fork its stream into the store, mount the
+  component, update it on the render tick alongside the gauge.
+
+**Tests:** unit-test `ticksToPercents` with fixture prev/next tick arrays (incl. a
+zero-delta core → 0%); FFI integration test asserts `cores.length === hw.logicalcpu`
+and every value ∈ [0, 100].
+
+**Verification:** `sysctl -n hw.logicalcpu` (expect 8 on this machine) should equal
+the bar count; compare bars to Activity Monitor's per-core view; confirm no FFI
+memory growth over time (the `vm_deallocate`).
+
+**Kickoff prompt for a future session:** *"Implement the deferred per-core CPU
+feature described under 'Future Work' in PLAN.md: Bun FFI `host_processor_info`
+collector + per-core bars, reusing collectorStream and the existing patterns."*
 
 ---
 

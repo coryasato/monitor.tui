@@ -1,11 +1,23 @@
 import { BunRuntime } from "@effect/platform-bun";
 import { createCliRenderer } from "@opentui/core";
-import { Duration, Effect, Layer, Schedule, Stream } from "effect";
+import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
 import { CpuCollectorMacOSLive } from "../collectors/cpu-macos.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
 import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
 import { RenderError } from "../types/errors.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
+import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
+import type { MetricState } from "../types/metrics.ts";
+
+/**
+ * A stable signature for a state: identical signatures mean nothing visible
+ * changed, so we can skip the redraw. New samples carry a fresh `at` timestamp.
+ */
+const signatureOf = (state: Option.Option<MetricState>): string =>
+  Option.match(state, {
+    onNone: () => "none",
+    onSome: (s) => (s._tag === "ok" ? `ok:${s.at}` : `unavailable:${s.at}`),
+  });
 
 /**
  * App root. Composes the collector + store Layers, owns the OpenTUI renderer as a
@@ -34,7 +46,9 @@ const program = Effect.gen(function* () {
 
   const renderer = yield* acquireRenderer;
   const gauge = makeCpuGauge(renderer);
+  const sparkline = makeCpuSparkline(renderer);
   renderer.root.add(gauge.root);
+  renderer.root.add(sparkline.root);
 
   // Collector fiber: drain the stream into the store. Scope-bound, so it is
   // interrupted automatically on shutdown.
@@ -43,20 +57,25 @@ const program = Effect.gen(function* () {
     Effect.forkScoped,
   );
 
-  // Render-tick fiber: pull the latest state and update the view. A RenderError
-  // degrades to a debug line instead of crashing the loop.
+  // Render-tick fiber: pull the latest state and update the views only when the
+  // sample actually changed (redraw-on-change), then request a single repaint.
+  // A RenderError degrades to a debug line instead of crashing the loop.
+  let lastSignature: string | null = null;
   yield* store.get("cpu").pipe(
     Effect.flatMap((state) =>
       Effect.try({
         try: () => {
+          const signature = signatureOf(state);
+          if (signature === lastSignature) return;
+          lastSignature = signature;
           gauge.update(state);
-          // Mutating renderable content marks it dirty; ask the renderer to
-          // repaint this frame (throttled by maxFps).
+          sparkline.push(state);
+          // Content changed; ask for one repaint (throttled by maxFps).
           renderer.requestRender();
         },
         catch: (cause) =>
           new RenderError({
-            component: "cpu-gauge",
+            component: "cpu-view",
             reason: cause instanceof Error ? cause.message : String(cause),
             cause,
           }),
