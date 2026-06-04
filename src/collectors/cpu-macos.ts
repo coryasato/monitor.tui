@@ -1,8 +1,13 @@
-import { Effect, Layer } from "effect";
+import { Duration, Effect, Layer, Schedule, Stream } from "effect";
 import * as v from "valibot";
 import { CpuCollector } from "../services/cpu-collector.ts";
 import { CollectorError } from "../types/errors.ts";
-import { Percent, Timestamp, type CpuSnapshot } from "../types/metrics.ts";
+import {
+  Percent,
+  Timestamp,
+  type CpuSnapshot,
+  type MetricState,
+} from "../types/metrics.ts";
 
 /**
  * macOS CPU collector. macOS has no `/proc`, so we shell out to `top` and parse
@@ -57,17 +62,32 @@ const RawCpuUsageSchema = v.object({
   idle: v.pipe(v.number(), v.finite(), v.minValue(0), v.maxValue(100)),
 });
 
+/**
+ * Run `top -l 2 -n 0` and return its stdout. Spawned via `Bun.spawn` (not
+ * `Bun.$`) so we can hook the abort signal `Effect.tryPromise` provides on
+ * interruption: when the fiber is interrupted (e.g. Ctrl+C) mid-sample, we kill
+ * the subprocess instead of leaving an orphaned `top` running.
+ */
+const runTop: Effect.Effect<string, CollectorError> = Effect.tryPromise({
+  try: (signal) => {
+    const proc = Bun.spawn(["top", "-l", "2", "-n", "0"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    signal.addEventListener("abort", () => proc.kill(), { once: true });
+    return new Response(proc.stdout).text();
+  },
+  catch: (cause) =>
+    new CollectorError({
+      collector: COLLECTOR,
+      reason: "failed to run `top`",
+      cause,
+    }),
+});
+
 /** One CPU reading: run `top`, parse, validate at the boundary, then brand. */
 const read: Effect.Effect<CpuSnapshot, CollectorError> = Effect.gen(function* () {
-  const raw = yield* Effect.tryPromise({
-    try: () => Bun.$`top -l 2 -n 0`.text(),
-    catch: (cause) =>
-      new CollectorError({
-        collector: COLLECTOR,
-        reason: "failed to run `top`",
-        cause,
-      }),
-  });
+  const raw = yield* runTop;
 
   const parsed = parseCpuUsage(raw);
   if (parsed === null) {
@@ -96,5 +116,39 @@ const read: Effect.Effect<CpuSnapshot, CollectorError> = Effect.gen(function* ()
   } satisfies CpuSnapshot;
 });
 
+/** Extra gap between samples. `top -l 2` already blocks ~1s for its own delta. */
+const POLL_GAP = Duration.millis(500);
+
+const toOk = (snapshot: CpuSnapshot): MetricState => ({
+  _tag: "ok",
+  tag: "cpu",
+  at: snapshot.at,
+  snapshot,
+});
+
+const toUnavailable = (reason: string): MetricState => ({
+  _tag: "unavailable",
+  tag: "cpu",
+  at: Timestamp(Date.now()),
+  reason,
+});
+
+/**
+ * Continuous CPU stream. Each tick runs {@link read}; a `CollectorError` is
+ * caught and converted to an `unavailable` state so the stream keeps running
+ * (graceful degradation). The collector owns its own cadence via `Schedule`.
+ */
+const stream: Stream.Stream<MetricState> = Stream.repeatEffect(
+  read.pipe(
+    Effect.map(toOk),
+    Effect.catchTag("CollectorError", (error) =>
+      Effect.succeed(toUnavailable(error.reason)),
+    ),
+  ),
+).pipe(Stream.schedule(Schedule.spaced(POLL_GAP)));
+
 /** Live macOS implementation of {@link CpuCollector}. */
-export const CpuCollectorMacOSLive = Layer.succeed(CpuCollector, { read });
+export const CpuCollectorMacOSLive = Layer.succeed(
+  CpuCollector,
+  CpuCollector.of({ read, stream }),
+);

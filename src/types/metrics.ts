@@ -40,3 +40,24 @@ export type MetricSnapshot = CpuSnapshot;
 
 /** The `_tag` of any metric snapshot — used as the key into the MetricsStore. */
 export type MetricTag = MetricSnapshot["_tag"];
+
+/**
+ * The latest known state of a metric, as held by the MetricsStore. A collector
+ * that fails recoverably reports `unavailable` (with a reason) instead of an
+ * error, so the UI can show "unavailable" for one metric while others keep
+ * updating — the graceful-degradation contract. Both variants carry `tag` so the
+ * store keying is uniform regardless of availability.
+ */
+export type MetricState =
+  | {
+      readonly _tag: "ok";
+      readonly tag: MetricTag;
+      readonly at: Timestamp;
+      readonly snapshot: MetricSnapshot;
+    }
+  | {
+      readonly _tag: "unavailable";
+      readonly tag: MetricTag;
+      readonly at: Timestamp;
+      readonly reason: string;
+    };
