@@ -149,14 +149,6 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
   sequence; and/or re-enable `exitOnCtrlC` and bridge its exit into the Effect
   shutdown. **Status: deferred** — low impact since `q` quits cleanly.
 
-- **Panels overflow short terminals (≤ ~24 rows).** The four panels (CPU gauge,
-  CPU history, MEM gauge, NET readout) stack vertically as full-bordered boxes
-  needing ~28 rows total; on a 24-row terminal the layout overflows and the bottom
-  content overlaps. Content is all correct — it just doesn't fit. Likely fixes: a
-  responsive/grid layout (two columns), drop per-box `padding`, a scrollable
-  container, or hide panels that don't fit. **Status: deferred** — renders fine in a
-  normal-height terminal. (Verify visual layout in a tall window, not a 24-row pty.)
-
 ---
 
 ## Future Work — Per-core CPU via Bun FFI (deferred from Phase 4)

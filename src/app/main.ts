@@ -1,5 +1,10 @@
 import { BunRuntime } from "@effect/platform-bun";
-import { createCliRenderer, TextRenderable } from "@opentui/core";
+import {
+  BoxRenderable,
+  createCliRenderer,
+  type Renderable,
+  TextRenderable,
+} from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
 import { CpuCollectorMacOSLive } from "../collectors/cpu-macos.ts";
 import { MemoryCollectorMacOSLive } from "../collectors/memory-macos.ts";
@@ -63,14 +68,15 @@ const program = Effect.gen(function* () {
 
   const renderer = yield* acquireRenderer;
 
-  // Build only the panels enabled by config (config-driven widgets).
+  // Build only the panels enabled by config (config-driven widgets). `cells` holds
+  // the panel boxes in display order; `panels` drives the render tick.
   const panels: Panel[] = [];
+  const cells: Renderable[] = [];
 
   if (config.cpu.enabled) {
     const cpuGauge = makeCpuGauge(renderer);
     const sparkline = makeCpuSparkline(renderer, config.sparkline.width);
-    renderer.root.add(cpuGauge.root);
-    renderer.root.add(sparkline.root);
+    cells.push(cpuGauge.root, sparkline.root);
     panels.push({
       tag: "cpu",
       stream: cpu.stream,
@@ -83,7 +89,7 @@ const program = Effect.gen(function* () {
 
   if (config.memory.enabled) {
     const memGauge = makeMemoryGauge(renderer);
-    renderer.root.add(memGauge.root);
+    cells.push(memGauge.root);
     panels.push({
       tag: "memory",
       stream: memory.stream,
@@ -93,13 +99,30 @@ const program = Effect.gen(function* () {
 
   if (config.network.enabled) {
     const netReadout = makeNetworkReadout(renderer);
-    renderer.root.add(netReadout.root);
+    cells.push(netReadout.root);
     panels.push({
       tag: "network",
       stream: network.stream,
       apply: (state) => netReadout.update(state),
     });
   }
+
+  // Responsive grid: a wrapping row of half-width cells. Panels flow
+  // left-to-right and wrap to the next line (Yoga `flexWrap`, which OpenTUI
+  // forwards), roughly halving the stack height so it fits short terminals
+  // (~24 rows). Items in each wrapped line share the line's height via the
+  // default `alignItems: "stretch"`.
+  const grid = new BoxRenderable(renderer, {
+    id: "grid",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    width: "100%",
+  });
+  for (const cell of cells) {
+    cell.width = "50%";
+    grid.add(cell);
+  }
+  renderer.root.add(grid);
 
   // App-level debug line for RenderErrors (independent of which panels exist).
   const debugLine = new TextRenderable(renderer, {
