@@ -3,15 +3,18 @@ import { createCliRenderer, TextRenderable } from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
 import { CpuCollectorMacOSLive } from "../collectors/cpu-macos.ts";
 import { MemoryCollectorMacOSLive } from "../collectors/memory-macos.ts";
+import { NetworkCollectorMacOSLive } from "../collectors/network-macos.ts";
 import { Config, ConfigLive } from "../services/config.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
 import { MemoryCollector } from "../services/memory-collector.ts";
 import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
+import { NetworkCollector } from "../services/network-collector.ts";
 import { RenderError } from "../types/errors.ts";
 import type { MetricState, MetricTag } from "../types/metrics.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
 import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
+import { makeNetworkReadout } from "../ui/components/network-readout.ts";
 
 /**
  * A stable signature for a state: identical signatures mean nothing visible
@@ -56,6 +59,7 @@ const program = Effect.gen(function* () {
   const store = yield* MetricsStore;
   const cpu = yield* CpuCollector;
   const memory = yield* MemoryCollector;
+  const network = yield* NetworkCollector;
 
   const renderer = yield* acquireRenderer;
 
@@ -84,6 +88,16 @@ const program = Effect.gen(function* () {
       tag: "memory",
       stream: memory.stream,
       apply: (state) => memGauge.update(state),
+    });
+  }
+
+  if (config.network.enabled) {
+    const netReadout = makeNetworkReadout(renderer);
+    renderer.root.add(netReadout.root);
+    panels.push({
+      tag: "network",
+      stream: network.stream,
+      apply: (state) => netReadout.update(state),
     });
   }
 
@@ -162,6 +176,7 @@ const AppLive = Layer.mergeAll(
   MetricsStoreLive,
   CpuCollectorMacOSLive,
   MemoryCollectorMacOSLive,
+  NetworkCollectorMacOSLive,
 );
 
 BunRuntime.runMain(
