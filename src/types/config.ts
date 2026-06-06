@@ -1,0 +1,23 @@
+/**
+ * Application configuration. Resolved once at startup from defaults < config file
+ * < CLI flags, then validated. Invalid config is a fatal `ConfigError` (the app
+ * exits with a clear message before the TUI starts).
+ */
+export interface AppConfig {
+  /** Render-tick interval in milliseconds (how often views are refreshed). */
+  readonly refreshMs: number;
+  /** CPU collector + gauge + history sparkline. */
+  readonly cpu: { readonly enabled: boolean };
+  /** Memory collector + gauge. */
+  readonly memory: { readonly enabled: boolean };
+  /** CPU history sparkline width (number of samples shown). */
+  readonly sparkline: { readonly width: number };
+}
+
+/** Defaults used when no file/flags override them. */
+export const defaultConfig: AppConfig = {
+  refreshMs: 250,
+  cpu: { enabled: true },
+  memory: { enabled: true },
+  sparkline: { width: 40 },
+};

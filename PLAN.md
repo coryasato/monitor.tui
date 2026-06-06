@@ -116,7 +116,14 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
    `MemorySnapshot`, `MemoryCollector` + macOS Layer, `MemoryGauge`. Extracted the
    shared `spawnText` helper (`src/collectors/spawn.ts`) and generalized `main.ts`'s
    render tick to a list of panels. The store is now genuinely multi-tag.
-2. **Config loading** (`ConfigError`, Valibot-validated file + CLI flags).
+2. ✅ **Config loading** — DONE. `src/types/config.ts` (`AppConfig` + defaults),
+   `src/services/config.ts` (`Config` tag, pure `parseArgs`/`mergeConfig`, Valibot
+   schemas, `loadConfigFrom` → `Effect<AppConfig, ConfigError>`, `ConfigLive`).
+   Precedence: defaults < `monitor.config.json` < CLI flags
+   (`--config/--refresh/--[no-]cpu/--[no-]memory/--sparkline-width`). `main.ts` gates
+   panels on `enabled` (config-driven widgets) and treats `ConfigError` as fatal
+   (clean message + exit 1, before the TUI starts) — exercises the last unused error
+   category.
 3. **Disk / Network** via `iostat` / `netstat`.
 4. **Docker** containers (once the daemon is available).
 5. **Linux Layers** for existing collectors (proves the abstraction).
