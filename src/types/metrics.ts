@@ -72,10 +72,24 @@ export interface NetworkSnapshot {
 }
 
 /**
- * Discriminated union of all metric snapshots, keyed by `_tag`. New collectors
- * add a member here (e.g. `DiskSnapshot`).
+ * Disk throughput at a point in time, summed across disks (combined read+write,
+ * since `iostat` reports a single MB/s per disk).
  */
-export type MetricSnapshot = CpuSnapshot | MemorySnapshot | NetworkSnapshot;
+export interface DiskSnapshot {
+  readonly _tag: "disk";
+  readonly at: Timestamp;
+  readonly bytesPerSec: BytesPerSec;
+}
+
+/**
+ * Discriminated union of all metric snapshots, keyed by `_tag`. New collectors
+ * add a member here.
+ */
+export type MetricSnapshot =
+  | CpuSnapshot
+  | MemorySnapshot
+  | NetworkSnapshot
+  | DiskSnapshot;
 
 /** The `_tag` of any metric snapshot — used as the key into the MetricsStore. */
 export type MetricTag = MetricSnapshot["_tag"];

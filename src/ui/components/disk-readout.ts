@@ -10,31 +10,31 @@ import type { MetricState } from "../../types/metrics.ts";
 import { formatRate } from "../format.ts";
 
 /**
- * Network readout: rx/tx throughput as text. Unlike the gauges there is no bar —
- * throughput has no natural 0–100 ceiling, so we just render a scaled rate. A
- * passive view; `update` is pushed the latest store state from the render tick.
+ * Disk readout: combined I/O throughput as text (no bar — throughput has no
+ * natural 0–100 ceiling). A passive view; `update` is pushed the latest store
+ * state from the render tick.
  */
 
-export interface NetworkReadout {
+export interface DiskReadout {
   readonly root: Renderable;
   readonly update: (state: Option.Option<MetricState>) => void;
 }
 
-export function makeNetworkReadout(renderer: CliRenderer): NetworkReadout {
+export function makeDiskReadout(renderer: CliRenderer): DiskReadout {
   const title = new TextRenderable(renderer, {
-    id: "net-title",
-    content: "NET",
+    id: "disk-title",
+    content: "DISK",
     fg: "#8BE9FD",
     attributes: TextAttributes.BOLD,
   });
   const value = new TextRenderable(renderer, {
-    id: "net-value",
+    id: "disk-value",
     content: "waiting for first reading…",
     fg: "#888888",
   });
 
   const root = new BoxRenderable(renderer, {
-    id: "net-readout",
+    id: "disk-readout",
     borderStyle: "rounded",
     padding: 1,
     flexDirection: "column",
@@ -49,7 +49,7 @@ export function makeNetworkReadout(renderer: CliRenderer): NetworkReadout {
         value.fg = "#888888";
       },
       onSome: (s) => {
-        if (s._tag === "unavailable" || s.snapshot._tag !== "network") {
+        if (s._tag === "unavailable" || s.snapshot._tag !== "disk") {
           value.content =
             s._tag === "unavailable"
               ? `unavailable (${s.reason})`
@@ -57,8 +57,7 @@ export function makeNetworkReadout(renderer: CliRenderer): NetworkReadout {
           value.fg = "#FF5555";
           return;
         }
-        const { rxBytesPerSec, txBytesPerSec } = s.snapshot;
-        value.content = `↓ ${formatRate(rxBytesPerSec)}   ↑ ${formatRate(txBytesPerSec)}`;
+        value.content = `I/O ${formatRate(s.snapshot.bytesPerSec)}`;
         value.fg = "#F8F8F2";
       },
     });

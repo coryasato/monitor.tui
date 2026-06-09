@@ -2,49 +2,39 @@ import { describe, expect, test } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
 import { Option } from "effect";
 import {
-  makeNetworkReadout,
-  type NetworkReadout,
-} from "../src/ui/components/network-readout.ts";
-import { formatRate } from "../src/ui/format.ts";
+  type DiskReadout,
+  makeDiskReadout,
+} from "../src/ui/components/disk-readout.ts";
 import {
   BytesPerSec,
   type MetricState,
   Timestamp,
 } from "../src/types/metrics.ts";
 
-const netOk = (rx: number, tx: number): MetricState => ({
+const diskOk = (bytesPerSec: number): MetricState => ({
   _tag: "ok",
-  tag: "network",
+  tag: "disk",
   at: Timestamp(1000),
   snapshot: {
-    _tag: "network",
+    _tag: "disk",
     at: Timestamp(1000),
-    rxBytesPerSec: BytesPerSec(rx),
-    txBytesPerSec: BytesPerSec(tx),
+    bytesPerSec: BytesPerSec(bytesPerSec),
   },
-});
-
-describe("formatRate", () => {
-  test("scales B/s → KB/s → MB/s", () => {
-    expect(formatRate(512)).toBe("512 B/s");
-    expect(formatRate(2 * 1024)).toBe("2.0 KB/s");
-    expect(formatRate(3 * 1024 * 1024)).toBe("3.0 MB/s");
-  });
 });
 
 const withReadout = async (
   body: (ctx: {
-    readout: NetworkReadout;
+    readout: DiskReadout;
     renderOnce: () => Promise<unknown>;
     frame: () => string;
   }) => Promise<void>,
 ): Promise<void> => {
   const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({
-    width: 60,
+    width: 50,
     height: 8,
   });
   try {
-    const readout = makeNetworkReadout(renderer);
+    const readout = makeDiskReadout(renderer);
     renderer.root.add(readout.root);
     await body({ readout, renderOnce, frame: captureCharFrame });
   } finally {
@@ -52,14 +42,14 @@ const withReadout = async (
   }
 };
 
-describe("NetworkReadout rendering", () => {
-  test("renders rx/tx rates", async () => {
+describe("DiskReadout rendering", () => {
+  test("renders combined I/O throughput", async () => {
     await withReadout(async ({ readout, renderOnce, frame }) => {
-      readout.update(Option.some(netOk(2 * 1024 * 1024, 512 * 1024)));
+      readout.update(Option.some(diskOk(5 * 1024 * 1024)));
       await renderOnce();
       const text = frame();
-      expect(text).toContain("2.0 MB/s");
-      expect(text).toContain("512.0 KB/s");
+      expect(text).toContain("I/O");
+      expect(text).toContain("5.0 MB/s");
     });
   });
 
@@ -68,13 +58,13 @@ describe("NetworkReadout rendering", () => {
       readout.update(
         Option.some({
           _tag: "unavailable",
-          tag: "network",
+          tag: "disk",
           at: Timestamp(2000),
-          reason: "netstat failed",
+          reason: "iostat failed",
         }),
       );
       await renderOnce();
-      expect(frame()).toContain("unavailable (netstat failed)");
+      expect(frame()).toContain("unavailable (iostat failed)");
     });
   });
 });

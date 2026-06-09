@@ -110,28 +110,33 @@ on change.
 
 ---
 
-## Phase 5+ — Next collectors (named, not specced)
-Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → component):
-1. ✅ **Memory** via `vm_stat` / `sysctl` — DONE. Added `Bytes` brand,
-   `MemorySnapshot`, `MemoryCollector` + macOS Layer, `MemoryGauge`. Extracted the
-   shared `spawnText` helper (`src/collectors/spawn.ts`) and generalized `main.ts`'s
-   render tick to a list of panels. The store is now genuinely multi-tag.
-2. ✅ **Config loading** — DONE. `src/types/config.ts` (`AppConfig` + defaults),
+## Phase 5 — Collectors ✅ DONE
+Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → component).
+1. ✅ **Memory** via `vm_stat` / `sysctl`. Added `Bytes` brand, `MemorySnapshot`,
+   `MemoryCollector` + macOS Layer, `MemoryGauge`. Extracted the shared `spawnText`
+   helper (`src/collectors/spawn.ts`) and generalized `main.ts`'s render tick to a
+   list of panels. The store is now genuinely multi-tag.
+2. ✅ **Config loading.** `src/types/config.ts` (`AppConfig` + defaults),
    `src/services/config.ts` (`Config` tag, pure `parseArgs`/`mergeConfig`, Valibot
    schemas, `loadConfigFrom` → `Effect<AppConfig, ConfigError>`, `ConfigLive`).
-   Precedence: defaults < `monitor.config.json` < CLI flags
-   (`--config/--refresh/--[no-]cpu/--[no-]memory/--sparkline-width`). `main.ts` gates
-   panels on `enabled` (config-driven widgets) and treats `ConfigError` as fatal
-   (clean message + exit 1, before the TUI starts) — exercises the last unused error
-   category.
-3. **Network** via `netstat -ib` — DONE ✅. Added `BytesPerSec` brand,
-   `NetworkSnapshot`, `NetworkCollector` + macOS Layer (samples `netstat -ib` twice
-   ~1s apart via `Effect.sleep`, diffs cumulative counters → rx/tx bytes/sec),
-   `NetworkReadout` (rate text, no bar), and a `network.enabled` config flag.
-   First rate-based metric + first stateful (two-sample) collector. **Disk** (`iostat`)
-   still TODO.
-4. **Docker** containers (once the daemon is available).
-5. **Linux Layers** for existing collectors (proves the abstraction).
+   Precedence: defaults < `monitor.config.json` < CLI flags (`--config`, `--refresh`,
+   `--[no-]cpu`, `--[no-]memory`, `--[no-]network`, `--[no-]disk`, `--sparkline-width`).
+   `main.ts` gates panels on `enabled` (config-driven widgets) and treats `ConfigError`
+   as fatal (clean message + exit 1, before the TUI starts) — exercises the last
+   unused error category.
+3. ✅ **Network** via `netstat -ib`. Added `BytesPerSec` brand, `NetworkSnapshot`,
+   `NetworkCollector` + macOS Layer (samples `netstat -ib` twice ~1s apart via
+   `Effect.sleep`, diffs cumulative counters → rx/tx bytes/sec), `NetworkReadout`
+   (rate text, no bar), `network.enabled` flag. First rate-based metric + first
+   stateful (two-sample) collector.
+4. ✅ **Disk** via `iostat -d -c 2 -w 1`. `DiskSnapshot` (combined bytes/sec),
+   `DiskCollector` + macOS Layer (pure `parseDiskThroughput` sums the MB/s columns of
+   the last interval row), `DiskReadout`, `disk.enabled` flag. Extracted shared
+   `formatRate` to `src/ui/format.ts` (used by net + disk readouts). Five panels now
+   wrap cleanly in the flexWrap grid with no layout changes.
+
+> **Docker** and **Linux Layers** were originally listed here but are deferred to
+> other sessions — see **Future Work** below.
 
 ---
 
@@ -151,11 +156,13 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
 
 ---
 
-## Future Work — Per-core CPU via Bun FFI (deferred from Phase 4)
+## Future Work (deferred to other sessions)
 
-> **This note is self-contained.** A future session starts cold with only the repo
+> Each item below is self-contained: a future session starts cold with only the repo
 > (code + CLAUDE.md + this file + git history) — no prior chat. Everything needed to
-> start is below; no earlier conversation context is required.
+> start is in the item; no earlier conversation context is required.
+
+### 1. Per-core CPU via Bun FFI (deferred from Phase 4)
 
 **Why deferred:** macOS exposes no per-core CPU% to unprivileged CLI tools. Probed
 2026-06-03: `top -l 1` has no per-cpu lines, `iostat -c` is aggregate, `ps -o %cpu`
@@ -202,6 +209,89 @@ memory growth over time (the `vm_deallocate`).
 feature described under 'Future Work' in PLAN.md: Bun FFI `host_processor_info`
 collector + per-core bars, reusing collectorStream and the existing patterns."*
 
+### 2. Docker container stats
+
+**Goal:** a panel listing running containers with per-container CPU% and memory
+usage (plus name/status), updating live like the other metrics.
+
+**Why deferred:** needs a running Docker daemon, which wasn't available during the
+initial build. Not required for the core system dashboard.
+
+**Data source (pick one):**
+- **`docker stats --no-stream --format "{{json .}}"`** — simplest; one JSON object
+  per container per line. Shell out via the existing `spawnText` helper. Each line:
+  `{ "Name", "CPUPerc": "12.34%", "MemUsage": "1.2GiB / 16GiB", "MemPerc", … }` —
+  strings that need parsing (strip `%`, parse the `used / total` byte sizes).
+- **Docker Engine API** over the unix socket `/var/run/docker.sock`
+  (`GET /containers/json`, `GET /containers/{id}/stats?stream=false`) via
+  `@effect/platform` `HttpClient`. More robust and matches CLAUDE.md's remote/HTTP
+  direction, but more setup (socket transport, compute CPU% from the stats deltas).
+  Recommended once remote features are on the table; otherwise start with `docker stats`.
+
+**Integration points (reuse existing patterns):**
+- `src/types/metrics.ts`: add `DockerSnapshot { _tag: "docker"; at: Timestamp;
+  containers: ReadonlyArray<{ name: string; cpu: Percent; memUsed: Bytes;
+  memTotal: Bytes; status?: string }> }` to the `MetricSnapshot` union.
+- `src/services/docker-collector.ts`: `Context.Tag` service (`read` + `stream`).
+- `src/collectors/docker-macos.ts` (or `-cli.ts`, platform-neutral): pure parser over
+  `docker stats` output (unit-testable with a captured fixture), Valibot-validate the
+  rows, brand, build with `collectorStream("docker", read, gap)`.
+- `src/ui/components/docker-table.ts`: a table/list of containers (consider
+  `TextTableRenderable` — exported by `@opentui/core`).
+- Handle "daemon not running": the collector's `read` should map that failure to a
+  `CollectorError`, so the panel shows `unavailable (...)` (graceful degradation) when
+  Docker is down — never a crash.
+- `src/types/config.ts` + `src/services/config.ts`: add a `docker.enabled` flag
+  (`--[no-]docker`); wire a panel in `src/app/main.ts`.
+
+**Kickoff prompt:** *"Implement the deferred Docker collector from PLAN.md Future
+Work: a DockerCollector reading `docker stats`, a container table panel, and a
+`docker.enabled` config flag — reuse collectorStream/spawnText and degrade to
+'unavailable' when the daemon is down."*
+
+### 3. Linux platform Layers
+
+**Goal:** make the app run on Linux, not just macOS — by adding Linux implementations
+of the *existing* collector service interfaces and selecting them at runtime.
+
+**Context / what this means:** the architecture was deliberately built "abstract now,
+macOS only" (Phase 0 decision). Every collector is an Effect **Service**
+(`Context.Tag`) — `CpuCollector`, `MemoryCollector`, `NetworkCollector`,
+`DiskCollector` — and the only platform-specific code lives in the macOS **Layer**
+implementations (`src/collectors/*-macos.ts`, which parse `top`/`vm_stat`/`netstat`/
+`iostat`). "Linux Layers" = add sibling `*-linux.ts` Layers implementing the **same**
+service interfaces from Linux data sources, then pick the right Layer per platform.
+Because the app depends only on the Service Tags, **nothing else changes** — this is
+the concrete payoff that validates the whole abstraction.
+
+**Linux data sources (all in procfs; mostly cumulative → diff two samples):**
+- **CPU** → `/proc/stat` first line `cpu  user nice system idle iowait irq softirq …`.
+  Read twice; `busy% = 1 − Δidle / Δtotal`. (macOS used `top`'s precomputed delta;
+  here you compute it — like the network collector already does.)
+- **Memory** → `/proc/meminfo` (`MemTotal`, `MemAvailable`; `used = total − available`).
+  Instantaneous, no diff.
+- **Network** → `/proc/net/dev` (per-interface cumulative rx/tx bytes). Diff two
+  samples — can **reuse `computeRates`** from `network-macos.ts` (extract it to a
+  shared module if so).
+- **Disk** → `/proc/diskstats` (sectors read/written; bytes = sectors × 512). Diff two
+  samples for bytes/sec.
+
+**Implementation notes:**
+- Read procfs with `Bun.file("/proc/stat").text()` (no subprocess) — consider a small
+  `readProcFile` helper analogous to `spawnText`, still interruptible-friendly.
+- Keep parsers **pure** (`parseProcStat`, `parseMeminfo`, …) and unit-test with
+  captured `/proc/*` fixtures (these tests run anywhere; the live integration tests
+  only run on Linux — gate with `process.platform === "linux"` or run in Linux CI).
+- **Platform selection:** in `src/app/main.ts` (or a small `layers.ts`), choose per
+  service, e.g. `const CpuLive = process.platform === "linux" ? CpuCollectorLinuxLive
+  : CpuCollectorMacOSLive;` then `Layer.mergeAll(...)` as today. Snapshot types,
+  `collectorStream`, the store, components, and config are all reused unchanged.
+
+**Kickoff prompt:** *"Implement the deferred Linux Layers from PLAN.md Future Work:
+add `*-linux.ts` Layers for the CPU/memory/network/disk services reading from procfs,
+with pure fixture-tested parsers, and select macOS vs Linux Layers by
+`process.platform` in main.ts."*
+
 ---
 
 ## Verification
@@ -219,7 +309,7 @@ script -q /tmp/tui.out timeout -s INT --preserve-status 10 bun src/app/main.ts >
 After it exits, confirm no collector subprocess was orphaned by interruption:
 
 ```sh
-pgrep -fl "top -l 2|vm_stat|hw.memsize" || echo "NONE — clean"
+pgrep -fl "top -l 2|vm_stat|hw.memsize|netstat -ib|iostat" || echo "NONE — clean"
 ```
 
 **Quitting:** press `q` for a clean shutdown (renderer destroyed, fibers
@@ -234,6 +324,8 @@ BunRuntime's signal handling. In-terminal **Ctrl+C does not quit yet** — see B
 - **Phase 3:** live CPU gauge renders real readings (grep `idle` in the pty capture).
 - **Phase 4:** History panel renders; sparkline glyphs (`▁`–`█`) appear and scroll;
   redraws only on sample change.
-- **Phase 5 (memory):** both `CPU` and `MEM` panels render; memory shows `GiB` and
-  ≈ Activity Monitor's "Memory Used"; one collector going `unavailable` leaves the
-  other updating (cross-tag isolation).
+- **Phase 5 (collectors):** all panels render in the flexWrap grid — `CPU` + history,
+  `MEM` (`GiB`, ≈ Activity Monitor's "Memory Used"), `NET` (`↓/↑` rates), `DISK`
+  (`I/O` rate). One collector going `unavailable` leaves the others updating
+  (cross-tag isolation). Feature flags (`--no-memory`, `--no-disk`, …) drop the
+  corresponding panel + collector.

@@ -12,6 +12,8 @@ export interface AppConfig {
   readonly memory: { readonly enabled: boolean };
   /** Network collector + readout. */
   readonly network: { readonly enabled: boolean };
+  /** Disk collector + readout. */
+  readonly disk: { readonly enabled: boolean };
   /** CPU history sparkline width (number of samples shown). */
   readonly sparkline: { readonly width: number };
 }
@@ -22,5 +24,6 @@ export const defaultConfig: AppConfig = {
   cpu: { enabled: true },
   memory: { enabled: true },
   network: { enabled: true },
+  disk: { enabled: true },
   sparkline: { width: 40 },
 };

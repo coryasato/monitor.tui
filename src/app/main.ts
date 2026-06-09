@@ -7,10 +7,12 @@ import {
 } from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
 import { CpuCollectorMacOSLive } from "../collectors/cpu-macos.ts";
+import { DiskCollectorMacOSLive } from "../collectors/disk-macos.ts";
 import { MemoryCollectorMacOSLive } from "../collectors/memory-macos.ts";
 import { NetworkCollectorMacOSLive } from "../collectors/network-macos.ts";
 import { Config, ConfigLive } from "../services/config.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
+import { DiskCollector } from "../services/disk-collector.ts";
 import { MemoryCollector } from "../services/memory-collector.ts";
 import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
 import { NetworkCollector } from "../services/network-collector.ts";
@@ -18,6 +20,7 @@ import { RenderError } from "../types/errors.ts";
 import type { MetricState, MetricTag } from "../types/metrics.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
 import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
+import { makeDiskReadout } from "../ui/components/disk-readout.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
 import { makeNetworkReadout } from "../ui/components/network-readout.ts";
 
@@ -65,6 +68,7 @@ const program = Effect.gen(function* () {
   const cpu = yield* CpuCollector;
   const memory = yield* MemoryCollector;
   const network = yield* NetworkCollector;
+  const disk = yield* DiskCollector;
 
   const renderer = yield* acquireRenderer;
 
@@ -104,6 +108,16 @@ const program = Effect.gen(function* () {
       tag: "network",
       stream: network.stream,
       apply: (state) => netReadout.update(state),
+    });
+  }
+
+  if (config.disk.enabled) {
+    const diskReadout = makeDiskReadout(renderer);
+    cells.push(diskReadout.root);
+    panels.push({
+      tag: "disk",
+      stream: disk.stream,
+      apply: (state) => diskReadout.update(state),
     });
   }
 
@@ -200,6 +214,7 @@ const AppLive = Layer.mergeAll(
   CpuCollectorMacOSLive,
   MemoryCollectorMacOSLive,
   NetworkCollectorMacOSLive,
+  DiskCollectorMacOSLive,
 );
 
 BunRuntime.runMain(
