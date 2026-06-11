@@ -23,6 +23,7 @@ import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
 import { makeDiskReadout } from "../ui/components/disk-readout.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
 import { makeNetworkReadout } from "../ui/components/network-readout.ts";
+import { awaitQuit } from "./quit.ts";
 
 /**
  * A stable signature for a state: identical signatures mean nothing visible
@@ -45,8 +46,8 @@ const signatureOf = (state: Option.Option<MetricState>): string =>
 const acquireRenderer = Effect.acquireRelease(
   Effect.promise(() =>
     createCliRenderer({
-      // Effect owns the lifecycle: SIGINT is handled by BunRuntime, and the
-      // Ctrl+C byte is caught by our input handler below.
+      // Effect owns the lifecycle: SIGINT is handled by BunRuntime, and Ctrl+C
+      // is caught by our parsed-key handler below (see the quit listener).
       exitOnCtrlC: false,
       exitSignals: [],
       targetFps: 30,
@@ -195,17 +196,10 @@ const program = Effect.gen(function* () {
     Effect.forkScoped,
   );
 
-  // Block until the user quits; returning closes the scope and tears everything
-  // down in reverse order (fibers interrupted, then renderer destroyed).
-  yield* Effect.async<void>((resume) => {
-    renderer.addInputHandler((seq) => {
-      if (seq === "q" || seq === "\x03") {
-        resume(Effect.void);
-        return true;
-      }
-      return false;
-    });
-  });
+  // Block until the user presses `q` or Ctrl+C; returning closes the scope and
+  // tears everything down in reverse order (fibers interrupted, then renderer
+  // destroyed). See `awaitQuit` for why this matches parsed keys, not raw bytes.
+  yield* awaitQuit(renderer);
 });
 
 const AppLive = Layer.mergeAll(

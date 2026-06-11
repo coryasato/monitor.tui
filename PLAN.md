@@ -140,22 +140,6 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
 
 ---
 
-## Bugs
-
-- **Ctrl+C does not quit the app (`q` works).** `src/app/main.ts` quits via an
-  `addInputHandler` matching the raw bytes `"q"` and `"\x03"` (Ctrl+C), with
-  `exitOnCtrlC: false` and `exitSignals: []` so Effect owns the lifecycle.
-  Suspected cause: the **Kitty keyboard protocol** (`useKittyKeyboard` defaults on)
-  encodes Ctrl+C as a CSI-u escape (e.g. `\x1b[99;5u`), not a bare `\x03`, so the
-  `seq === "\x03"` check never matches; and because the terminal is in raw mode,
-  no SIGINT fires for BunRuntime to catch either. Workaround: press `q`.
-  Likely fixes (verify which): parse the key via `renderer.keyInput` and match
-  `key.ctrl && key.name === "c"` instead of raw bytes; and/or also match the CSI-u
-  sequence; and/or re-enable `exitOnCtrlC` and bridge its exit into the Effect
-  shutdown. **Status: deferred** — low impact since `q` quits cleanly.
-
----
-
 ## Future Work (deferred to other sessions)
 
 > Each item below is self-contained: a future session starts cold with only the repo
@@ -312,9 +296,9 @@ After it exits, confirm no collector subprocess was orphaned by interruption:
 pgrep -fl "top -l 2|vm_stat|hw.memsize|netstat -ib|iostat" || echo "NONE — clean"
 ```
 
-**Quitting:** press `q` for a clean shutdown (renderer destroyed, fibers
-interrupted). The harness `timeout -s INT` above also exits cleanly via
-BunRuntime's signal handling. In-terminal **Ctrl+C does not quit yet** — see Bugs.
+**Quitting:** press `q` or Ctrl+C for a clean shutdown (renderer destroyed,
+fibers interrupted). The harness `timeout -s INT` above also exits cleanly via
+BunRuntime's signal handling.
 
 **Per-phase checks:**
 - **Phase 1:** scratch program (`bun src/app/cpu-demo.ts`) prints a plausible CPU %
