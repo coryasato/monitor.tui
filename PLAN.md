@@ -146,81 +146,7 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
 > (code + CLAUDE.md + this file + git history) — no prior chat. Everything needed to
 > start is in the item; no earlier conversation context is required.
 
-### 1. Per-core CPU via Bun FFI (deferred from Phase 4) ✅ DONE
-
-**Shipped (2026-06-12):** Bun FFI `host_processor_info` collector + per-core bars,
-exactly as planned below. `src/collectors/cpu-cores.c` (hand-declared Mach
-prototypes — TinyCC chokes on `<mach/mach.h>`; `vm_deallocate`s the kernel array),
-compiled at load via `cc` in `src/collectors/cpu-cores-macos.ts` with pure
-`ticksToPercents` (handles 32-bit counter wrap + zero-delta cores). New
-`CpuCoresCollector` service, `PerCoreCpuSnapshot` (`_tag: "cpu-cores"`), `makeCpuCores`
-component (lazy per-core bar rows reusing `renderBar`/`loadColor`), `cpuCores.enabled`
-config + `--[no-]cpu-cores`, wired into `main.ts`. Tests in `tests/cpu-cores-macos.test.ts`
-(+ wrap/zero-delta units) and `tests/cpu-cores.test.ts`. Verified: 8 bars =
-`hw.logicalcpu`, no FFI RSS growth over 200k calls, app boots/tears down clean.
-Also added a `*.c` ambient module decl (`src/types/c-module.d.ts`) for `tsc`.
-
-The original plan is kept below for reference.
-
-**Why deferred:** macOS exposes no per-core CPU% to unprivileged CLI tools. Probed
-2026-06-03: `top -l 1` has no per-cpu lines, `iostat -c` is aggregate, `ps -o %cpu`
-is per-process. The kernel source is the Mach call `host_processor_info(...,
-PROCESSOR_CPU_LOAD_INFO, ...)`, which returns per-core cumulative tick counters
-(`CPU_STATE_USER`, `SYSTEM`, `IDLE`, `NICE`). `sudo powermetrics` also works but
-needs root every run — rejected for a daily-usable tool.
-
-**Recommended approach — compile a tiny C helper with Bun FFI `cc`** (simpler than
-marshalling Mach out-params/pointers from JS, and avoids a separate build step):
-- Use `import { cc } from "bun:ffi"` to compile inline C that calls
-  `host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &n, &info, &cnt)`,
-  writes per-core ticks into a caller-provided `uint64_t*` buffer, then
-  `vm_deallocate`s the returned array (**required — leaks otherwise**). Mach symbols
-  live in libSystem (linked automatically). Return the logical core count.
-- Bun's `cc` compiles with TinyCC, which can fail on the full `<mach/mach.h>`
-  include tree. Fallback if it does: skip the include and declare the few needed
-  prototypes (`mach_host_self`, `host_processor_info`, `vm_deallocate`) and
-  constants (`PROCESSOR_CPU_LOAD_INFO = 2`, `CPU_STATE_MAX = 4`, the four state
-  indices) manually in the inline C — the symbols still resolve from libSystem.
-- The tick counters are `natural_t` (**unsigned 32-bit**) and can wrap. Widen to
-  `uint64_t` in the output buffer, but `ticksToPercents` must still handle a
-  negative per-counter delta (wrap): either add `2**32` or clamp that core to 0
-  for the sample and let the next tick recover. Unit-test this case.
-- `host_processor_info` gives **cumulative** ticks (instantaneous), unlike
-  `top -l 2`. So the collector must diff two samples. Simplest: take two samples
-  ~250ms apart **inside one `read`** (mirrors current `read` shape) and compute
-  `busy% = (Δuser+Δsystem+Δnice) / (Δuser+Δsystem+Δnice+Δidle) * 100` per core.
-
-**Integration points (reuse existing patterns):**
-- `src/types/metrics.ts`: add `PerCoreCpuSnapshot { _tag: "cpu-cores"; at: Timestamp;
-  cores: ReadonlyArray<Percent> }` to the `MetricSnapshot` union (this auto-extends
-  `MetricTag` with `"cpu-cores"` and lets the store hold it with no store changes).
-- `src/services/cpu-cores-collector.ts`: new `Context.Tag` service (`read` + `stream`),
-  mirroring `cpu-collector.ts`.
-- `src/collectors/cpu-cores-macos.ts`: FFI layer; pure `ticksToPercents(prev, next)`
-  helper (unit-testable); validate core count with Valibot; build the stream with the
-  existing `collectorStream("cpu-cores", read, gap)` from `collector-stream.ts`.
-- `src/ui/components/cpu-cores.ts`: N horizontal bars (reuse `renderBar`/`loadColor`
-  exported from `cpu-gauge.ts`).
-- `src/types/config.ts` + `src/services/config.ts`: add a `cpuCores.enabled` flag
-  (`--[no-]cpu-cores`), like the other panels — `main.ts` gates panels on config.
-- `src/app/main.ts`: merge the new Layer into `AppLive` and add a `Panel` entry
-  (tag `"cpu-cores"`, the collector's stream, an `apply` that updates the
-  component) inside the new config gate — the existing fork/render-tick loops
-  pick it up automatically.
-
-**Tests:** unit-test `ticksToPercents` with fixture prev/next tick arrays (incl. a
-zero-delta core → 0%); FFI integration test asserts `cores.length === hw.logicalcpu`
-and every value ∈ [0, 100].
-
-**Verification:** `sysctl -n hw.logicalcpu` (expect 8 on this machine) should equal
-the bar count; compare bars to Activity Monitor's per-core view; confirm no FFI
-memory growth over time (the `vm_deallocate`).
-
-**Kickoff prompt for a future session:** *"Implement the deferred per-core CPU
-feature described under 'Future Work' in PLAN.md: Bun FFI `host_processor_info`
-collector + per-core bars, reusing collectorStream and the existing patterns."*
-
-### 2. Docker container stats
+### 1. Docker container stats
 
 **Goal:** a panel listing running containers with per-container CPU% and memory
 usage (plus name/status), updating live like the other metrics.
@@ -260,7 +186,7 @@ Work: a DockerCollector reading `docker stats`, a container table panel, and a
 `docker.enabled` config flag — reuse collectorStream/spawnText and degrade to
 'unavailable' when the daemon is down."*
 
-### 3. Linux platform Layers
+### 2. Linux platform Layers
 
 **Goal:** make the app run on Linux, not just macOS — by adding Linux implementations
 of the *existing* collector service interfaces and selecting them at runtime.
