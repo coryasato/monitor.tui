@@ -20,6 +20,7 @@ export interface CliOverrides {
   configPath?: string;
   refreshMs?: number;
   cpu?: { enabled?: boolean };
+  cpuCores?: { enabled?: boolean };
   memory?: { enabled?: boolean };
   network?: { enabled?: boolean };
   disk?: { enabled?: boolean };
@@ -54,6 +55,12 @@ export const parseArgs = (
       case "--no-cpu":
         overrides.cpu = { enabled: false };
         break;
+      case "--cpu-cores":
+        overrides.cpuCores = { enabled: true };
+        break;
+      case "--no-cpu-cores":
+        overrides.cpuCores = { enabled: false };
+        break;
       case "--memory":
         overrides.memory = { enabled: true };
         break;
@@ -85,6 +92,7 @@ export const parseArgs = (
 const FileConfigSchema = v.object({
   refreshMs: v.optional(v.number()),
   cpu: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
+  cpuCores: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   memory: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   network: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   disk: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
@@ -96,6 +104,7 @@ type FileConfig = v.InferOutput<typeof FileConfigSchema>;
 const AppConfigSchema = v.object({
   refreshMs: v.pipe(v.number(), v.integer(), v.minValue(50), v.maxValue(10_000)),
   cpu: v.object({ enabled: v.boolean() }),
+  cpuCores: v.object({ enabled: v.boolean() }),
   memory: v.object({ enabled: v.boolean() }),
   network: v.object({ enabled: v.boolean() }),
   disk: v.object({ enabled: v.boolean() }),
@@ -114,6 +123,10 @@ export const mergeConfig = (
 ): AppConfig => ({
   refreshMs: cli.refreshMs ?? file.refreshMs ?? base.refreshMs,
   cpu: { enabled: cli.cpu?.enabled ?? file.cpu?.enabled ?? base.cpu.enabled },
+  cpuCores: {
+    enabled:
+      cli.cpuCores?.enabled ?? file.cpuCores?.enabled ?? base.cpuCores.enabled,
+  },
   memory: {
     enabled: cli.memory?.enabled ?? file.memory?.enabled ?? base.memory.enabled,
   },

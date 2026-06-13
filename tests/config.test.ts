@@ -49,6 +49,14 @@ describe("parseArgs", () => {
     });
   });
 
+  test("distinguishes --cpu-cores from --cpu", () => {
+    expect(parseArgs(["--no-cpu-cores"]).overrides).toEqual({
+      cpuCores: { enabled: false },
+    });
+    // --cpu must not be swallowed by the cpu-cores cases.
+    expect(parseArgs(["--cpu"]).overrides).toEqual({ cpu: { enabled: true } });
+  });
+
   test("collects unrecognized args", () => {
     expect(parseArgs(["--bogus", "x"]).unknown).toEqual(["--bogus", "x"]);
   });
@@ -62,7 +70,13 @@ describe("mergeConfig", () => {
     expect(merged.refreshMs).toBe(1000); // cli wins over file
     expect(merged.memory.enabled).toBe(false); // file wins over default
     expect(merged.cpu.enabled).toBe(true); // default
+    expect(merged.cpuCores.enabled).toBe(true); // default
     expect(merged.sparkline.width).toBe(defaultConfig.sparkline.width);
+  });
+
+  test("cli cpuCores flag overrides the default", () => {
+    const merged = mergeConfig(defaultConfig, {}, { cpuCores: { enabled: false } });
+    expect(merged.cpuCores.enabled).toBe(false);
   });
 });
 

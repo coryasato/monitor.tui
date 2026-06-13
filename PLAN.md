@@ -146,7 +146,21 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
 > (code + CLAUDE.md + this file + git history) — no prior chat. Everything needed to
 > start is in the item; no earlier conversation context is required.
 
-### 1. Per-core CPU via Bun FFI (deferred from Phase 4)
+### 1. Per-core CPU via Bun FFI (deferred from Phase 4) ✅ DONE
+
+**Shipped (2026-06-12):** Bun FFI `host_processor_info` collector + per-core bars,
+exactly as planned below. `src/collectors/cpu-cores.c` (hand-declared Mach
+prototypes — TinyCC chokes on `<mach/mach.h>`; `vm_deallocate`s the kernel array),
+compiled at load via `cc` in `src/collectors/cpu-cores-macos.ts` with pure
+`ticksToPercents` (handles 32-bit counter wrap + zero-delta cores). New
+`CpuCoresCollector` service, `PerCoreCpuSnapshot` (`_tag: "cpu-cores"`), `makeCpuCores`
+component (lazy per-core bar rows reusing `renderBar`/`loadColor`), `cpuCores.enabled`
+config + `--[no-]cpu-cores`, wired into `main.ts`. Tests in `tests/cpu-cores-macos.test.ts`
+(+ wrap/zero-delta units) and `tests/cpu-cores.test.ts`. Verified: 8 bars =
+`hw.logicalcpu`, no FFI RSS growth over 200k calls, app boots/tears down clean.
+Also added a `*.c` ambient module decl (`src/types/c-module.d.ts`) for `tsc`.
+
+The original plan is kept below for reference.
 
 **Why deferred:** macOS exposes no per-core CPU% to unprivileged CLI tools. Probed
 2026-06-03: `top -l 1` has no per-cpu lines, `iostat -c` is aggregate, `ps -o %cpu`
@@ -162,6 +176,15 @@ marshalling Mach out-params/pointers from JS, and avoids a separate build step):
   writes per-core ticks into a caller-provided `uint64_t*` buffer, then
   `vm_deallocate`s the returned array (**required — leaks otherwise**). Mach symbols
   live in libSystem (linked automatically). Return the logical core count.
+- Bun's `cc` compiles with TinyCC, which can fail on the full `<mach/mach.h>`
+  include tree. Fallback if it does: skip the include and declare the few needed
+  prototypes (`mach_host_self`, `host_processor_info`, `vm_deallocate`) and
+  constants (`PROCESSOR_CPU_LOAD_INFO = 2`, `CPU_STATE_MAX = 4`, the four state
+  indices) manually in the inline C — the symbols still resolve from libSystem.
+- The tick counters are `natural_t` (**unsigned 32-bit**) and can wrap. Widen to
+  `uint64_t` in the output buffer, but `ticksToPercents` must still handle a
+  negative per-counter delta (wrap): either add `2**32` or clamp that core to 0
+  for the sample and let the next tick recover. Unit-test this case.
 - `host_processor_info` gives **cumulative** ticks (instantaneous), unlike
   `top -l 2`. So the collector must diff two samples. Simplest: take two samples
   ~250ms apart **inside one `read`** (mirrors current `read` shape) and compute
@@ -178,8 +201,12 @@ marshalling Mach out-params/pointers from JS, and avoids a separate build step):
   existing `collectorStream("cpu-cores", read, gap)` from `collector-stream.ts`.
 - `src/ui/components/cpu-cores.ts`: N horizontal bars (reuse `renderBar`/`loadColor`
   exported from `cpu-gauge.ts`).
-- `src/app/main.ts`: merge the new Layer, fork its stream into the store, mount the
-  component, update it on the render tick alongside the gauge.
+- `src/types/config.ts` + `src/services/config.ts`: add a `cpuCores.enabled` flag
+  (`--[no-]cpu-cores`), like the other panels — `main.ts` gates panels on config.
+- `src/app/main.ts`: merge the new Layer into `AppLive` and add a `Panel` entry
+  (tag `"cpu-cores"`, the collector's stream, an `apply` that updates the
+  component) inside the new config gate — the existing fork/render-tick loops
+  pick it up automatically.
 
 **Tests:** unit-test `ticksToPercents` with fixture prev/next tick arrays (incl. a
 zero-delta core → 0%); FFI integration test asserts `cores.length === hw.logicalcpu`

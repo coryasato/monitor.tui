@@ -6,11 +6,13 @@ import {
   TextRenderable,
 } from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
+import { CpuCoresCollectorMacOSLive } from "../collectors/cpu-cores-macos.ts";
 import { CpuCollectorMacOSLive } from "../collectors/cpu-macos.ts";
 import { DiskCollectorMacOSLive } from "../collectors/disk-macos.ts";
 import { MemoryCollectorMacOSLive } from "../collectors/memory-macos.ts";
 import { NetworkCollectorMacOSLive } from "../collectors/network-macos.ts";
 import { Config, ConfigLive } from "../services/config.ts";
+import { CpuCoresCollector } from "../services/cpu-cores-collector.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
 import { DiskCollector } from "../services/disk-collector.ts";
 import { MemoryCollector } from "../services/memory-collector.ts";
@@ -18,6 +20,7 @@ import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
 import { NetworkCollector } from "../services/network-collector.ts";
 import { RenderError } from "../types/errors.ts";
 import type { MetricState, MetricTag } from "../types/metrics.ts";
+import { makeCpuCores } from "../ui/components/cpu-cores.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
 import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
 import { makeDiskReadout } from "../ui/components/disk-readout.ts";
@@ -67,6 +70,7 @@ const program = Effect.gen(function* () {
   const config = yield* Config;
   const store = yield* MetricsStore;
   const cpu = yield* CpuCollector;
+  const cpuCores = yield* CpuCoresCollector;
   const memory = yield* MemoryCollector;
   const network = yield* NetworkCollector;
   const disk = yield* DiskCollector;
@@ -89,6 +93,16 @@ const program = Effect.gen(function* () {
         cpuGauge.update(state);
         sparkline.push(state);
       },
+    });
+  }
+
+  if (config.cpuCores.enabled) {
+    const cpuCoresPanel = makeCpuCores(renderer);
+    cells.push(cpuCoresPanel.root);
+    panels.push({
+      tag: "cpu-cores",
+      stream: cpuCores.stream,
+      apply: (state) => cpuCoresPanel.update(state),
     });
   }
 
@@ -206,6 +220,7 @@ const AppLive = Layer.mergeAll(
   ConfigLive,
   MetricsStoreLive,
   CpuCollectorMacOSLive,
+  CpuCoresCollectorMacOSLive,
   MemoryCollectorMacOSLive,
   NetworkCollectorMacOSLive,
   DiskCollectorMacOSLive,

@@ -47,6 +47,17 @@ export interface CpuSnapshot {
 }
 
 /**
+ * Per-core CPU usage at a point in time: one busy percentage per logical core,
+ * in core order. Computed by diffing two cumulative tick samples from the Mach
+ * `host_processor_info` call (see the macOS FFI collector).
+ */
+export interface PerCoreCpuSnapshot {
+  readonly _tag: "cpu-cores";
+  readonly at: Timestamp;
+  readonly cores: ReadonlyArray<Percent>;
+}
+
+/**
  * Physical memory usage at a point in time. `usedBytes` follows Activity
  * Monitor's "Memory Used" (active + wired + compressed); `usedPercent` is
  * `usedBytes / totalBytes`.
@@ -87,6 +98,7 @@ export interface DiskSnapshot {
  */
 export type MetricSnapshot =
   | CpuSnapshot
+  | PerCoreCpuSnapshot
   | MemorySnapshot
   | NetworkSnapshot
   | DiskSnapshot;

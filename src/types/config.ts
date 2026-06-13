@@ -8,6 +8,8 @@ export interface AppConfig {
   readonly refreshMs: number;
   /** CPU collector + gauge + history sparkline. */
   readonly cpu: { readonly enabled: boolean };
+  /** Per-core CPU collector (Bun FFI) + bars. */
+  readonly cpuCores: { readonly enabled: boolean };
   /** Memory collector + gauge. */
   readonly memory: { readonly enabled: boolean };
   /** Network collector + readout. */
@@ -22,6 +24,7 @@ export interface AppConfig {
 export const defaultConfig: AppConfig = {
   refreshMs: 250,
   cpu: { enabled: true },
+  cpuCores: { enabled: true },
   memory: { enabled: true },
   network: { enabled: true },
   disk: { enabled: true },
