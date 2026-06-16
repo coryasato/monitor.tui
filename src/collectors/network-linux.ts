@@ -2,49 +2,44 @@ import { Duration, Effect, Layer } from "effect";
 import * as v from "valibot";
 import { NetworkCollector } from "../services/network-collector.ts";
 import { CollectorError } from "../types/errors.ts";
-import {
-  BytesPerSec,
-  type NetworkSnapshot,
-  Timestamp,
-} from "../types/metrics.ts";
+import { BytesPerSec, type NetworkSnapshot, Timestamp } from "../types/metrics.ts";
 import { collectorStream } from "./collector-stream.ts";
 import { computeRates, type NetTotals, RawRatesSchema } from "./net-rates.ts";
-import { spawnText } from "./spawn.ts";
-
-// Rate math is shared across platforms; re-exported here so existing importers
-// (and tests) of `network-macos.ts` keep working unchanged.
-export { computeRates, type NetTotals } from "./net-rates.ts";
+import { readProcFile } from "./proc.ts";
 
 /**
- * macOS network collector. `netstat -ib` reports **cumulative** byte counters per
- * interface, so throughput is computed by sampling twice ~1s apart and dividing
- * the delta by the elapsed time. Loopback (`lo*`) is excluded.
+ * Linux network collector. `/proc/net/dev` reports **cumulative** byte counters
+ * per interface, so — like the macOS collector — throughput comes from sampling
+ * twice ~1s apart and diffing (via the shared {@link computeRates}). Loopback
+ * (`lo`) is excluded. Each interface line is `name: rx_bytes rx_packets … (16
+ * fields)`; the first field is received bytes and the ninth is transmitted bytes.
  */
 
 const COLLECTOR = "network";
 
+const PROC_NET_DEV = "/proc/net/dev";
+
+/** Field index (after the `name:` colon) of the transmitted-bytes counter. */
+const TX_BYTES_INDEX = 8;
+
 /**
- * Pure: sum rx/tx cumulative bytes from `netstat -ib` output. Only the per-
- * interface `<Link#N>` rows are counted (address rows duplicate the same totals),
- * and loopback is skipped. Returns `null` if no interface row parsed.
- *
- * Some Link rows carry a MAC Address and some don't, so the byte columns are not
- * at fixed indices — but the trailing seven counters always are: the row ends
- * `… Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll`, so Ibytes is `len-5` and
- * Obytes is `len-2`.
+ * Pure: sum rx/tx cumulative bytes from `/proc/net/dev` output. The two header
+ * lines have no `name:` colon and are skipped, as is loopback. Returns `null` if
+ * no interface row parsed. Exported for unit testing.
  */
-export function parseNetTotals(raw: string): NetTotals | null {
+export function parseProcNetDev(raw: string): NetTotals | null {
   let rxBytes = 0;
   let txBytes = 0;
   let matched = 0;
   for (const line of raw.split("\n")) {
-    const cols = line.trim().split(/\s+/);
-    const name = cols[0];
-    if (name === undefined || name.startsWith("lo")) continue;
-    if (cols[2]?.startsWith("<Link#") !== true) continue;
-    if (cols.length < 9) continue;
-    const rx = Number(cols[cols.length - 5]);
-    const tx = Number(cols[cols.length - 2]);
+    const colon = line.indexOf(":");
+    if (colon === -1) continue; // header rows ("Inter-|", "face |") have none
+    const name = line.slice(0, colon).trim();
+    if (name === "" || name === "lo") continue;
+    const cols = line.slice(colon + 1).trim().split(/\s+/);
+    if (cols.length <= TX_BYTES_INDEX) continue;
+    const rx = Number(cols[0]);
+    const tx = Number(cols[TX_BYTES_INDEX]);
     if (!Number.isFinite(rx) || !Number.isFinite(tx)) continue;
     rxBytes += rx;
     txBytes += tx;
@@ -58,12 +53,12 @@ const SAMPLE_INTERVAL = Duration.seconds(1);
 
 const sampleTotals: Effect.Effect<NetTotals, CollectorError> = Effect.gen(
   function* () {
-    const raw = yield* spawnText(["netstat", "-ib"], COLLECTOR);
-    const totals = parseNetTotals(raw);
+    const raw = yield* readProcFile(PROC_NET_DEV, COLLECTOR);
+    const totals = parseProcNetDev(raw);
     if (totals === null) {
       return yield* new CollectorError({
         collector: COLLECTOR,
-        reason: "could not parse any interface from `netstat -ib`",
+        reason: "could not parse any interface from /proc/net/dev",
       });
     }
     return totals;
@@ -110,8 +105,8 @@ const POLL_GAP = Duration.millis(500);
 
 const stream = collectorStream("network", read, POLL_GAP);
 
-/** Live macOS implementation of {@link NetworkCollector}. */
-export const NetworkCollectorMacOSLive = Layer.succeed(
+/** Live Linux implementation of {@link NetworkCollector}. */
+export const NetworkCollectorLinuxLive = Layer.succeed(
   NetworkCollector,
   NetworkCollector.of({ read, stream }),
 );

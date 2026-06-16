@@ -24,7 +24,7 @@ export interface AppConfig {
 export const defaultConfig: AppConfig = {
   refreshMs: 250,
   cpu: { enabled: true },
-  cpuCores: { enabled: true },
+  cpuCores: { enabled: false },
   memory: { enabled: true },
   network: { enabled: true },
   disk: { enabled: true },

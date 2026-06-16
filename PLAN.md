@@ -146,47 +146,21 @@ Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → 
 > (code + CLAUDE.md + this file + git history) — no prior chat. Everything needed to
 > start is in the item; no earlier conversation context is required.
 
-### 1. Docker container stats
+### 1. Linux platform Layers ✅ DONE
 
-**Goal:** a panel listing running containers with per-container CPU% and memory
-usage (plus name/status), updating live like the other metrics.
-
-**Why deferred:** needs a running Docker daemon, which wasn't available during the
-initial build. Not required for the core system dashboard.
-
-**Data source (pick one):**
-- **`docker stats --no-stream --format "{{json .}}"`** — simplest; one JSON object
-  per container per line. Shell out via the existing `spawnText` helper. Each line:
-  `{ "Name", "CPUPerc": "12.34%", "MemUsage": "1.2GiB / 16GiB", "MemPerc", … }` —
-  strings that need parsing (strip `%`, parse the `used / total` byte sizes).
-- **Docker Engine API** over the unix socket `/var/run/docker.sock`
-  (`GET /containers/json`, `GET /containers/{id}/stats?stream=false`) via
-  `@effect/platform` `HttpClient`. More robust and matches CLAUDE.md's remote/HTTP
-  direction, but more setup (socket transport, compute CPU% from the stats deltas).
-  Recommended once remote features are on the table; otherwise start with `docker stats`.
-
-**Integration points (reuse existing patterns):**
-- `src/types/metrics.ts`: add `DockerSnapshot { _tag: "docker"; at: Timestamp;
-  containers: ReadonlyArray<{ name: string; cpu: Percent; memUsed: Bytes;
-  memTotal: Bytes; status?: string }> }` to the `MetricSnapshot` union.
-- `src/services/docker-collector.ts`: `Context.Tag` service (`read` + `stream`).
-- `src/collectors/docker-macos.ts` (or `-cli.ts`, platform-neutral): pure parser over
-  `docker stats` output (unit-testable with a captured fixture), Valibot-validate the
-  rows, brand, build with `collectorStream("docker", read, gap)`.
-- `src/ui/components/docker-table.ts`: a table/list of containers (consider
-  `TextTableRenderable` — exported by `@opentui/core`).
-- Handle "daemon not running": the collector's `read` should map that failure to a
-  `CollectorError`, so the panel shows `unavailable (...)` (graceful degradation) when
-  Docker is down — never a crash.
-- `src/types/config.ts` + `src/services/config.ts`: add a `docker.enabled` flag
-  (`--[no-]docker`); wire a panel in `src/app/main.ts`.
-
-**Kickoff prompt:** *"Implement the deferred Docker collector from PLAN.md Future
-Work: a DockerCollector reading `docker stats`, a container table panel, and a
-`docker.enabled` config flag — reuse collectorStream/spawnText and degrade to
-'unavailable' when the daemon is down."*
-
-### 2. Linux platform Layers
+> Implemented: sibling `*-linux.ts` Layers (`cpu`, `memory`, `network`, `disk`,
+> **plus `cpu-cores`** — `/proc/stat` already carries per-core lines, so per-core
+> needs no privileged call on Linux as it does on macOS). All read procfs via a new
+> `readProcFile` helper (`src/collectors/proc.ts`, the procfs analog of `spawnText`).
+> Rate math was extracted to shared `src/collectors/net-rates.ts` (`computeRates`,
+> `NetTotals`, `RawRatesSchema`), reused by both network Layers. Platform selection
+> lives in `src/app/layers.ts` (`CollectorsLive`, choosing per service by
+> `process.platform === "linux"`); `main.ts` just merges `CollectorsLive` unchanged.
+> The macOS per-core FFI compile is now **lazy** (first `read`, not import) so
+> `cpu-cores-macos.ts` is import-safe on Linux. Pure parsers (`parseProcStat`,
+> `parseProcStatCores`, `parseMeminfo`, `parseProcNetDev`, `parseDiskStats` +
+> `computeCpuUsage`/`coresUsage`/`computeDiskThroughput`) are fixture-tested anywhere;
+> the live integration tests are gated on `process.platform === "linux"`.
 
 **Goal:** make the app run on Linux, not just macOS — by adding Linux implementations
 of the *existing* collector service interfaces and selecting them at runtime.

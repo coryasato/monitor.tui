@@ -70,7 +70,7 @@ describe("mergeConfig", () => {
     expect(merged.refreshMs).toBe(1000); // cli wins over file
     expect(merged.memory.enabled).toBe(false); // file wins over default
     expect(merged.cpu.enabled).toBe(true); // default
-    expect(merged.cpuCores.enabled).toBe(true); // default
+    expect(merged.cpuCores.enabled).toBe(defaultConfig.cpuCores.enabled); // default
     expect(merged.sparkline.width).toBe(defaultConfig.sparkline.width);
   });
 

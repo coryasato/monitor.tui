@@ -6,11 +6,6 @@ import {
   TextRenderable,
 } from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
-import { CpuCoresCollectorMacOSLive } from "../collectors/cpu-cores-macos.ts";
-import { CpuCollectorMacOSLive } from "../collectors/cpu-macos.ts";
-import { DiskCollectorMacOSLive } from "../collectors/disk-macos.ts";
-import { MemoryCollectorMacOSLive } from "../collectors/memory-macos.ts";
-import { NetworkCollectorMacOSLive } from "../collectors/network-macos.ts";
 import { Config, ConfigLive } from "../services/config.ts";
 import { CpuCoresCollector } from "../services/cpu-cores-collector.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
@@ -26,6 +21,7 @@ import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
 import { makeDiskReadout } from "../ui/components/disk-readout.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
 import { makeNetworkReadout } from "../ui/components/network-readout.ts";
+import { CollectorsLive } from "./layers.ts";
 import { awaitQuit } from "./quit.ts";
 
 /**
@@ -216,15 +212,7 @@ const program = Effect.gen(function* () {
   yield* awaitQuit(renderer);
 });
 
-const AppLive = Layer.mergeAll(
-  ConfigLive,
-  MetricsStoreLive,
-  CpuCollectorMacOSLive,
-  CpuCoresCollectorMacOSLive,
-  MemoryCollectorMacOSLive,
-  NetworkCollectorMacOSLive,
-  DiskCollectorMacOSLive,
-);
+const AppLive = Layer.mergeAll(ConfigLive, MetricsStoreLive, CollectorsLive);
 
 BunRuntime.runMain(
   Effect.scoped(Effect.provide(program, AppLive)).pipe(

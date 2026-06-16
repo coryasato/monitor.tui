@@ -32,15 +32,26 @@ const POLL_GAP = Duration.millis(500);
 
 /**
  * Compile `cpu-cores.c` once with Bun's `cc` (TinyCC) and bind `read_core_ticks`.
- * Mach symbols resolve from libSystem, which is linked automatically. Done at
- * module load so a compile failure surfaces immediately (and only on macOS).
+ * Mach symbols resolve from libSystem, which is linked automatically.
+ *
+ * The compile is **lazy** (memoized on first `read`), not at module load: this
+ * file is statically imported on every platform for layer selection, and the
+ * Mach FFI only links on macOS. Deferring keeps the import side-effect-free on
+ * Linux; a compile failure then surfaces through `sampleTicks` as a recoverable
+ * `CollectorError` rather than crashing at startup.
  */
-const { read_core_ticks } = cc({
-  source,
-  symbols: {
-    read_core_ticks: { args: ["ptr", "int"], returns: "int" },
-  },
-}).symbols;
+let readCoreTicks: ((buf: BigUint64Array, max: number) => number) | null = null;
+const loadReadCoreTicks = (): ((buf: BigUint64Array, max: number) => number) => {
+  if (readCoreTicks === null) {
+    readCoreTicks = cc({
+      source,
+      symbols: {
+        read_core_ticks: { args: ["ptr", "int"], returns: "int" },
+      },
+    }).symbols.read_core_ticks;
+  }
+  return readCoreTicks;
+};
 
 /** Cumulative tick counters for one logical core. */
 export interface CoreTicks {
@@ -56,7 +67,7 @@ export interface CoreTicks {
  */
 const sampleTicks = (): ReadonlyArray<CoreTicks> | null => {
   const buf = new BigUint64Array(MAX_CORES * CPU_STATE_MAX);
-  const count = read_core_ticks(buf, MAX_CORES);
+  const count = loadReadCoreTicks()(buf, MAX_CORES);
   if (count <= 0) return null;
   const n = Math.min(count, MAX_CORES);
   const cores: CoreTicks[] = [];
