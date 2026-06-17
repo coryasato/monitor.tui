@@ -20,137 +20,147 @@ Layer + Stream from Phase 1*.
 
 ---
 
-## Phase 0 — Foundation ✅ DONE
-**Goal:** project skeleton, dependencies, shared types compile.
+## Next Features
 
-- [x] `bun add effect`.
-- [x] Create `/src` tree (`services`, `collectors`, `ui`, `app`, `types`).
-- [x] `/src/types/errors.ts` — error taxonomy as `Data.TaggedError`:
-  `CollectorError` (recoverable), `ConfigError` (fatal), `RenderError` (degrade).
-- [x] `/src/types/metrics.ts` — `MetricSnapshot` value type + branded types
-  (`Percent`, `Timestamp`). Discriminated union keyed by `_tag`.
-
-**Milestone:** `bun run typecheck` passes; `bun index.ts` still renders. ✅
+Each item is self-contained: a future session starts cold with only the repo
+(code + CLAUDE.md + this file + git history) — no prior chat. Everything needed to
+start is in the item.
 
 ---
 
-## Phase 1 — CPU collector (the Effect core lesson) ✅ DONE
-**Goal:** read real CPU usage once, through a Service + Layer, with typed errors.
+### 1 — Process List Panel
 
-- `/src/services/cpu-collector.ts` — `CpuCollector` `Context.Tag`; `read: Effect<CpuSnapshot, CollectorError>`.
-- `/src/collectors/cpu-macos.ts` — `CpuCollectorMacOSLive` Layer:
-  - Source: `top -l 2 -n 0`, parse the **second** "CPU usage:" line (first sample is
-    meaningless). Pure `parseCpuUsage(raw)`, unit-testable.
-  - **Valibot validates parsed shape at the boundary**; failure → `CollectorError`.
-  - Wrap `Bun.$` in `Effect.tryPromise`, map failure → `CollectorError`.
-- Unit test `parseCpuUsage` against a captured `top` fixture.
+**Goal:** a 50/50 split layout — process table on the left, existing metric widgets on the right.
 
-**Milestone:** a small Effect program provides the Layer and prints a real CPU %.
+**Layout redesign:** this feature restructures the top-level layout. The terminal is divided into two vertical halves:
+- **Left 50%** — `ProcessTableComponent`, scrollable, fills available height.
+- **Right 50%** — the existing widget stack (CPU gauge + sparkline, MEM, NET, DISK). This side is unchanged from today; the split just moves it to the right column.
 
----
+This layout is the foundation for Feature 2: when a process is pinned, the right half swaps from widgets to the focus panel.
 
-## Phase 2 — Streaming + MetricsStore ✅ DONE
-**Goal:** continuous, cancellable, resource-managed metric flow.
+- `ProcessSnapshot` — per-process record: `pid`, `name`, `cpuPercent`, `memBytes`,
+  `status`. Branded types for pid (`ProcessId`).
+- `ProcessCollector` service + macOS Layer: source `ps aux` (or on Linux, `/proc`
+  enumeration via the existing procfs Layer). Pure `parseProcessList(raw)`,
+  unit-testable. Valibot validates at the boundary.
+- `ProcessTableComponent` — scrollable list (up/down arrow keys), columns: `PID`,
+  `NAME`, `CPU%`, `MEM`. Sortable by CPU or MEM (toggle with `c`/`m`). Kill
+  focused process with `k` (confirm prompt).
+- Reuse `collectorStream` from `src/collectors/collector-stream.ts`.
+- Config flag: `--[no-]process`, `process.enabled` in `AppConfig`. When disabled, layout reverts to the original full-width widget stack.
+- `process.maxRows` config option (default: fill available height).
 
-> Implemented: recovery/cadence logic extracted into the reusable
-> `src/collectors/collector-stream.ts` (`collectorStream(tag, read, gap)`), which
-> every future collector should reuse. `top` is spawned via `Bun.spawn` and killed
-> on the interrupt `AbortSignal` so SIGINT leaves no orphaned subprocess.
-
-- `read` → `Stream<CpuSnapshot, CollectorError>` (`Stream.repeatEffect` + `Schedule`).
-  Collector owns interval + recovery (`catchTag` → "unavailable" snapshot, keep going).
-- `/src/services/metrics-store.ts` — `Ref`-backed map keyed by collector tag.
-  Writes from the collector fiber; reads are pull-based.
-- Collector runs as a fiber via `acquireRelease`; Ctrl+C tears it down cleanly.
-
-**Milestone:** CPU value updates every N ms in console; clean Ctrl+C shutdown.
+**Milestone:** 50/50 layout renders — process table live on the left, metric widgets on the right. Table scrolls, sorts, and a process can be killed interactively.
 
 ---
 
-## Phase 3 — TUI wiring (vanilla OpenTUI) ✅ DONE
-**Goal:** live CPU gauge on screen, pull-based reads.
+### 2 — Process Focus View
 
-- `/src/app/main.ts` — `BunRuntime.runMain`, compose Layers, start renderer.
-- `/src/ui/components/cpu-gauge.ts` — CPU gauge (% text + colored bar); read latest
-  snapshot from `MetricsStore` each render tick (never push fiber→component).
-- `RenderError` → debug line via `gauge.showDebug`, never crash the loop.
+**Goal:** pin a process from the table; the right half of the layout switches from the widget stack to a dedicated live view for that PID.
 
-**Milestone:** a live, updating CPU gauge in the terminal. ✅
+- **Selection:** press `Enter` on a highlighted row. The right 50% of the layout (established in Feature 1) swaps from the metric widget stack to `ProcessFocusPanel`. Press `Escape` to unpin — right side reverts to widgets.
+- `ProcessFocusSnapshot` — per-sample record for a single PID: `cpuPercent`, `memBytes`, `threadCount`, `openFds`, `status`. Sourced from `ps -p <pid> -o ...` (macOS) or `/proc/<pid>/status` + `/proc/<pid>/fd` (Linux).
+- **PID-scoped collector** — dynamically created on pin, torn down on unpin via `acquireRelease`. Registers in `MetricsStore` under a `pid:<n>` tag. No collector runs when nothing is pinned.
+- `ProcessFocusPanel` component:
+  - Header: `PID 1234 — bun src/app/main.ts`
+  - CPU sparkline (reuse `CpuSparkline` pattern) — rolling history for this PID only.
+  - Memory sparkline — same rolling window.
+  - Stats row: `Threads: 8   Open FDs: 42   Status: running`
+- **PID exit handling:** if the pinned process exits, auto-unpin immediately and emit a toast notification: `"PID 1234 exited — See Logs / Dismiss"`. "See Logs" is a stub for Feature 6; for now it dismisses. The collector tears down cleanly via the `acquireRelease` finalizer.
+- No new config flag — focus is always available when the process panel is enabled.
 
-> Notes for later: (1) mutating renderable `.content` does **not** auto-repaint —
-> `main.ts` calls `renderer.requestRender()` each tick; (2) verifying a TUI needs a
-> real PTY (`script -q out.txt timeout -s INT --preserve-status 8 bun src/app/main.ts`),
-> piping to a non-TTY only shows the first frame; (3) component tests use
-> `@opentui/core/testing` `createTestRenderer` + `captureCharFrame()`.
-
----
-
-## Phase 4 — CPU history graph (rescoped) ✅ DONE
-**Goal:** a scrolling sparkline of recent CPU load beneath the gauge.
-
-> **Scope decision (2026-06-03):** per-core was dropped from this phase. macOS
-> exposes **no** per-core CPU% via unprivileged CLI (`top`, `iostat -c`, `ps` all
-> give aggregate only). Per-core needs `host_processor_info` via Bun FFI or
-> `sudo powermetrics` — moved to *Future Work* below. This phase ships the history
-> graph for **aggregate** CPU, which has no such blocker.
-
-- Rolling history of recent `used` (= user + system) samples. **Decide:** keep the
-  ring buffer in the **UI component** (simplest — store stays "latest only") vs. in
-  the store. Recommended: component-owned ring buffer; the store contract stays
-  pull-based and unchanged.
-- New `src/ui/components/cpu-sparkline.ts` — render history with block glyphs
-  (`▁▂▃▄▅▆▇█`) scaled to 0–100%. `push(state)` + `render()`.
-- **Redraw-on-change optimization:** the render tick currently calls
-  `renderer.requestRender()` every tick. Change to request a render only when the
-  rendered content actually changed (compare to last-rendered value), honoring the
-  "minimize redraws" goal in CLAUDE.md.
-
-**Milestone:** a live scrolling CPU history sparkline under the gauge; redraws only
-on change.
+**Milestone:** pin a `bun` process, watch live CPU + memory sparklines in the right panel; unpin cleanly; kill the process externally and see the exit toast.
 
 ---
 
-## Phase 5 — Collectors ✅ DONE
-Each reuses the Phase 1–3 pattern (Service → Layer → Stream → Store → component).
-1. ✅ **Memory** via `vm_stat` / `sysctl`. Added `Bytes` brand, `MemorySnapshot`,
-   `MemoryCollector` + macOS Layer, `MemoryGauge`. Extracted the shared `spawnText`
-   helper (`src/collectors/spawn.ts`) and generalized `main.ts`'s render tick to a
-   list of panels. The store is now genuinely multi-tag.
-2. ✅ **Config loading.** `src/types/config.ts` (`AppConfig` + defaults),
-   `src/services/config.ts` (`Config` tag, pure `parseArgs`/`mergeConfig`, Valibot
-   schemas, `loadConfigFrom` → `Effect<AppConfig, ConfigError>`, `ConfigLive`).
-   Precedence: defaults < `monitor.config.json` < CLI flags (`--config`, `--refresh`,
-   `--[no-]cpu`, `--[no-]memory`, `--[no-]network`, `--[no-]disk`, `--sparkline-width`).
-   `main.ts` gates panels on `enabled` (config-driven widgets) and treats `ConfigError`
-   as fatal (clean message + exit 1, before the TUI starts) — exercises the last
-   unused error category.
-3. ✅ **Network** via `netstat -ib`. Added `BytesPerSec` brand, `NetworkSnapshot`,
-   `NetworkCollector` + macOS Layer (samples `netstat -ib` twice ~1s apart via
-   `Effect.sleep`, diffs cumulative counters → rx/tx bytes/sec), `NetworkReadout`
-   (rate text, no bar), `network.enabled` flag. First rate-based metric + first
-   stateful (two-sample) collector.
-4. ✅ **Disk** via `iostat -d -c 2 -w 1`. `DiskSnapshot` (combined bytes/sec),
-   `DiskCollector` + macOS Layer (pure `parseDiskThroughput` sums the MB/s columns of
-   the last interval row), `DiskReadout`, `disk.enabled` flag. Extracted shared
-   `formatRate` to `src/ui/format.ts` (used by net + disk readouts). Five panels now
-   wrap cleanly in the flexWrap grid with no layout changes.
+### 6 — Process Crash / Log Viewer
 
-> **Docker** and **Linux Layers** were originally listed here but are deferred to
-> other sessions — see **Future Work** below.
+**Goal:** when a pinned process exits unexpectedly, surface a modal or drawer with available diagnostic data — exit code, stderr tail, resource usage at exit.
+
+- Triggered by the exit toast from Feature 2 ("See Logs" action).
+- `ProcessExitRecord` — captured at the moment of exit: `pid`, `name`, `exitCode`, `exitSignal`, `finalCpuPercent`, `finalMemBytes`, `stderrTail` (last N lines if the process was launched from this TUI; `null` if attached to an existing PID).
+- **Modal overlay** — full-width drawer slides up from the bottom or a centered modal: shows the exit record in a readable format. Dismiss with `Escape` or `d`.
+- **Constraint:** if the process was not launched by this TUI (i.e., we attached to an existing PID), stderr is unavailable — show what we have (exit code, signal, final resource snapshot) and note the limitation.
+- Adds the concept of a modal/overlay layer to the OpenTUI layout — the first interactive overlay in the app.
+- No collector changes — data is captured once at exit and held in a `Ref<Option<ProcessExitRecord>>`.
+
+**Milestone:** kill a pinned process; "See Logs" opens a modal showing exit code and final resource stats; `Escape` dismisses.
 
 ---
 
-## Future Work (deferred to other sessions)
+### 3 — Process Search & Filter
 
-> Each item below is self-contained: a future session starts cold with only the repo
-> (code + CLAUDE.md + this file + git history) — no prior chat. Everything needed to
-> start is in the item; no earlier conversation context is required.
+**Goal:** type to filter the process table by name so the user can find a specific process fast without scrolling 200 rows.
+
+- Press `/` in the process table to enter filter mode. A search bar appears at the top of the panel: `Filter: █`.
+- Typing filters rows in real time (case-insensitive substring match on process name). Match count shown: `12 / 204`.
+- `Escape` clears the filter and exits filter mode. `Enter` locks the filter in place (table stays filtered, `/` to edit again).
+- Filter persists across collector refresh cycles — new processes appearing or disappearing don't reset the filter. Match count updates live: `3 / 204`.
+- Filter state lives in the `ProcessTableComponent` — no new service or collector needed.
+- Filtered view feeds directly into the focus/pin flow: filter to `bun`, arrow to the row, press `Enter` to pin it.
+
+**Milestone:** press `/`, type `bun`, table narrows to matching processes; `Escape` restores the full list.
+
+---
+
+### 4 — Thermal & Battery Panel
+
+**Goal:** CPU temperature and battery stats for laptops; graceful no-op on desktops/Linux.
+
+- `ThermalSnapshot` — `cpuTempCelsius: number | null` (null when unavailable).
+- `BatterySnapshot` — `percent: number`, `charging: boolean`, `timeRemaining: number | null`.
+- macOS Layer:
+  - Thermal: `ioreg -rn AppleSmartBattery` or `sudo powermetrics --samplers smc -n 1`
+    (prefer `ioreg` — no sudo). Fall back gracefully to `null` if unavailable.
+  - Battery: `pmset -g batt`. Pure `parseBattery(raw)`, unit-testable.
+- `ThermalBatteryReadout` component — single compact row: `CPU 42°C  🔋 87% (2h 14m)`.
+  Hidden entirely when both snapshots are unavailable (desktop/Linux).
+- Config flag: `--[no-]thermal`.
+
+**Milestone:** thermal + battery row renders on a MacBook; missing on a desktop with no battery.
+
+---
+
+### 5 — Alerts & Thresholds
+
+**Goal:** configurable high-watermark alerts that flash a panel red and optionally emit a system notification.
+
+- `AlertConfig` — per-metric thresholds in `AppConfig`:
+  ```json
+  {
+    "alerts": {
+      "cpu": { "warn": 75, "critical": 90 },
+      "memory": { "warn": 80, "critical": 95 },
+      "disk": { "warn": 80, "critical": 95 }
+    }
+  }
+  ```
+- `AlertState` discriminated union: `"ok" | "warn" | "critical"`.
+- Each panel component reads its current snapshot and resolves `AlertState`; the
+  gauge/bar renders in the matching color (green → yellow → red).
+- Optional: `osascript` (macOS) or `notify-send` (Linux) system notification on
+  first crossing into `critical` (debounced — one notification per crossing, not
+  per sample). Config flag `alerts.notify`.
+- No new collector — purely a UI + config layer concern.
+
+**Milestone:** CPU gauge turns yellow at warn and red at critical thresholds from config; system notification fires once on first critical crossing.
+
+---
+
+## UI Polish & Layout (Backlog)
+
+Deferred until core features (1–6) are solid. No specs yet — pick an item, flesh it out, and move it into Next Features when ready.
+
+- Resizable split panes (left/right via keyboard or drag)
+- Widget pin/unpin with persisted layout state (written to config file — builds on existing `AppConfig` pipeline)
+- Redesigned widget visuals (better gauges, richer sparklines, borders/headers)
+- Theming / color scheme config
 
 ---
 
 ## Verification
 
-**Every phase:** `bun run typecheck` (`tsc --noEmit`) and `bun test` stay green.
+**Every feature:** `bun run typecheck` (`tsc --noEmit`) and `bun test` stay green.
 
 **TUI smoke test (needs a real PTY).** Piping the TUI to a non-TTY shows only the
 first frame, so drive it through a pty and capture the output:
@@ -169,17 +179,3 @@ pgrep -fl "top -l 2|vm_stat|hw.memsize|netstat -ib|iostat" || echo "NONE — cle
 **Quitting:** press `q` or Ctrl+C for a clean shutdown (renderer destroyed,
 fibers interrupted). The harness `timeout -s INT` above also exits cleanly via
 BunRuntime's signal handling.
-
-**Per-phase checks:**
-- **Phase 1:** scratch program (`bun src/app/cpu-demo.ts`) prints a plausible CPU %
-  matching Activity Monitor.
-- **Phase 2:** `bun src/app/stream-demo.ts` — value changes on the interval; clean
-  exit, no orphaned subprocess.
-- **Phase 3:** live CPU gauge renders real readings (grep `idle` in the pty capture).
-- **Phase 4:** History panel renders; sparkline glyphs (`▁`–`█`) appear and scroll;
-  redraws only on sample change.
-- **Phase 5 (collectors):** all panels render in the flexWrap grid — `CPU` + history,
-  `MEM` (`GiB`, ≈ Activity Monitor's "Memory Used"), `NET` (`↓/↑` rates), `DISK`
-  (`I/O` rate). One collector going `unavailable` leaves the others updating
-  (cross-tag isolation). Feature flags (`--no-memory`, `--no-disk`, …) drop the
-  corresponding panel + collector.
