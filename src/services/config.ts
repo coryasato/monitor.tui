@@ -24,6 +24,7 @@ export interface CliOverrides {
   memory?: { enabled?: boolean };
   network?: { enabled?: boolean };
   disk?: { enabled?: boolean };
+  process?: { enabled?: boolean };
   sparklineWidth?: number;
 }
 
@@ -79,6 +80,12 @@ export const parseArgs = (
       case "--no-disk":
         overrides.disk = { enabled: false };
         break;
+      case "--process":
+        overrides.process = { enabled: true };
+        break;
+      case "--no-process":
+        overrides.process = { enabled: false };
+        break;
       default:
         unknown.push(arg);
     }
@@ -96,6 +103,7 @@ const FileConfigSchema = v.object({
   memory: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   network: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   disk: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
+  process: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   sparkline: v.optional(v.object({ width: v.optional(v.number()) })),
 });
 type FileConfig = v.InferOutput<typeof FileConfigSchema>;
@@ -108,6 +116,7 @@ const AppConfigSchema = v.object({
   memory: v.object({ enabled: v.boolean() }),
   network: v.object({ enabled: v.boolean() }),
   disk: v.object({ enabled: v.boolean() }),
+  process: v.object({ enabled: v.boolean() }),
   sparkline: v.object({
     width: v.pipe(v.number(), v.integer(), v.minValue(4), v.maxValue(200)),
   }),
@@ -136,6 +145,10 @@ export const mergeConfig = (
   },
   disk: {
     enabled: cli.disk?.enabled ?? file.disk?.enabled ?? base.disk.enabled,
+  },
+  process: {
+    enabled:
+      cli.process?.enabled ?? file.process?.enabled ?? base.process.enabled,
   },
   sparkline: {
     width: cli.sparklineWidth ?? file.sparkline?.width ?? base.sparkline.width,

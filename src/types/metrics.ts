@@ -27,6 +27,13 @@ export const Bytes = Brand.refined<Bytes>(
   (n) => Brand.error(`Expected a non-negative byte count, got ${n}`),
 );
 
+/** A process identifier — a positive integer pid. */
+export type ProcessId = number & Brand.Brand<"ProcessId">;
+export const ProcessId = Brand.refined<ProcessId>(
+  (n) => Number.isInteger(n) && n > 0,
+  (n) => Brand.error(`Expected a positive integer pid, got ${n}`),
+);
+
 /** A non-negative throughput in bytes per second (distinct from a {@link Bytes} count). */
 export type BytesPerSec = number & Brand.Brand<"BytesPerSec">;
 export const BytesPerSec = Brand.refined<BytesPerSec>(
@@ -93,6 +100,43 @@ export interface DiskSnapshot {
 }
 
 /**
+ * Coarse process lifecycle state, normalized across platforms (macOS
+ * `pbi_status`, Linux `/proc/<pid>/stat` state char) into one closed union.
+ */
+export type ProcessStatus =
+  | "running"
+  | "sleeping"
+  | "idle"
+  | "stopped"
+  | "zombie"
+  | "unknown";
+
+/**
+ * One process at a point in time. `name` is the full (untruncated) command path
+ * so downstream search (Feature 3) can match on it; the table truncates for
+ * display. `cpuPercent` is **instantaneous** (a two-sample diff) and normalized
+ * to share of total machine CPU, so it stays in [0, 100] like the other gauges.
+ */
+export interface ProcessRecord {
+  readonly pid: ProcessId;
+  readonly name: string;
+  readonly cpuPercent: Percent;
+  readonly memBytes: Bytes;
+  readonly status: ProcessStatus;
+}
+
+/**
+ * The full process table at a point in time — one snapshot carries every row.
+ * Replaces the previous snapshot wholesale on each sample (the store is
+ * latest-only), so the UI re-windows/re-sorts from a single immutable value.
+ */
+export interface ProcessListSnapshot {
+  readonly _tag: "process";
+  readonly at: Timestamp;
+  readonly processes: ReadonlyArray<ProcessRecord>;
+}
+
+/**
  * Discriminated union of all metric snapshots, keyed by `_tag`. New collectors
  * add a member here.
  */
@@ -101,7 +145,8 @@ export type MetricSnapshot =
   | PerCoreCpuSnapshot
   | MemorySnapshot
   | NetworkSnapshot
-  | DiskSnapshot;
+  | DiskSnapshot
+  | ProcessListSnapshot;
 
 /** The `_tag` of any metric snapshot — used as the key into the MetricsStore. */
 export type MetricTag = MetricSnapshot["_tag"];

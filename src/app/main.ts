@@ -1,8 +1,8 @@
 import { BunRuntime } from "@effect/platform-bun";
 import {
   BoxRenderable,
-  createCliRenderer,
   type Renderable,
+  TextAttributes,
   TextRenderable,
 } from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
@@ -10,9 +10,12 @@ import { Config, ConfigLive } from "../services/config.ts";
 import { CpuCoresCollector } from "../services/cpu-cores-collector.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
 import { DiskCollector } from "../services/disk-collector.ts";
+import { InputRouter, InputRouterLive } from "../services/input-router.ts";
 import { MemoryCollector } from "../services/memory-collector.ts";
 import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
 import { NetworkCollector } from "../services/network-collector.ts";
+import { ProcessCollector } from "../services/process-collector.ts";
+import { Renderer, RendererLive } from "../services/renderer.ts";
 import { RenderError } from "../types/errors.ts";
 import type { MetricState, MetricTag } from "../types/metrics.ts";
 import { makeCpuCores } from "../ui/components/cpu-cores.ts";
@@ -22,7 +25,6 @@ import { makeDiskReadout } from "../ui/components/disk-readout.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
 import { makeNetworkReadout } from "../ui/components/network-readout.ts";
 import { CollectorsLive } from "./layers.ts";
-import { awaitQuit } from "./quit.ts";
 
 /**
  * A stable signature for a state: identical signatures mean nothing visible
@@ -35,25 +37,11 @@ const signatureOf = (state: Option.Option<MetricState>): string =>
   });
 
 /**
- * App root. Resolves config, composes the collector + store Layers, owns the
- * OpenTUI renderer as a managed resource, runs the enabled collectors and a
- * render-tick loop as scope-bound fibers, and waits for a quit key. On quit the
- * scope closes: fibers are interrupted and the renderer is destroyed.
+ * App root. Resolves config, composes the collector + store + renderer + input
+ * Layers, runs the enabled collectors and a render-tick loop as scope-bound
+ * fibers, and blocks on the InputRouter's quit signal. On quit the scope closes:
+ * fibers are interrupted and the renderer is destroyed.
  */
-
-/** Lifetime is bound to the enclosing scope — `destroy()` runs on shutdown. */
-const acquireRenderer = Effect.acquireRelease(
-  Effect.promise(() =>
-    createCliRenderer({
-      // Effect owns the lifecycle: SIGINT is handled by BunRuntime, and Ctrl+C
-      // is caught by our parsed-key handler below (see the quit listener).
-      exitOnCtrlC: false,
-      exitSignals: [],
-      targetFps: 30,
-    }),
-  ),
-  (renderer) => Effect.sync(() => renderer.destroy()),
-);
 
 /** A configured metric panel: a store tag, its stream, and the views it drives. */
 interface Panel {
@@ -70,11 +58,13 @@ const program = Effect.gen(function* () {
   const memory = yield* MemoryCollector;
   const network = yield* NetworkCollector;
   const disk = yield* DiskCollector;
+  const processes = yield* ProcessCollector;
 
-  const renderer = yield* acquireRenderer;
+  const renderer = yield* Renderer;
+  const router = yield* InputRouter;
 
   // Build only the panels enabled by config (config-driven widgets). `cells` holds
-  // the panel boxes in display order; `panels` drives the render tick.
+  // the metric-widget boxes in display order; `panels` drives the render tick.
   const panels: Panel[] = [];
   const cells: Renderable[] = [];
 
@@ -134,9 +124,7 @@ const program = Effect.gen(function* () {
 
   // Responsive grid: a wrapping row of half-width cells. Panels flow
   // left-to-right and wrap to the next line (Yoga `flexWrap`, which OpenTUI
-  // forwards), roughly halving the stack height so it fits short terminals
-  // (~24 rows). Items in each wrapped line share the line's height via the
-  // default `alignItems: "stretch"`.
+  // forwards), roughly halving the stack height so it fits short terminals.
   const grid = new BoxRenderable(renderer, {
     id: "grid",
     flexDirection: "row",
@@ -147,7 +135,55 @@ const program = Effect.gen(function* () {
     cell.width = "50%";
     grid.add(cell);
   }
-  renderer.root.add(grid);
+
+  // Layout. With the process panel enabled we split into two columns — an
+  // (initially empty) left pane that Feature 1 fills with the process table, and
+  // the widget grid on the right. Disabled → the original full-width grid.
+  if (config.process.enabled) {
+    // `flexGrow: 1` (not `height: "100%"`) so the split fills the space left after
+    // the debug line. Yoga's default `flexShrink` is 0, so a `height: "100%"`
+    // child in this column root would overflow and push the debug line off-screen.
+    const split = new BoxRenderable(renderer, {
+      id: "split",
+      flexDirection: "row",
+      width: "100%",
+      flexGrow: 1,
+    });
+    const leftPane = new BoxRenderable(renderer, {
+      id: "left-pane",
+      width: "50%",
+      borderStyle: "rounded",
+      padding: 1,
+      flexDirection: "column",
+    });
+    leftPane.add(
+      new TextRenderable(renderer, {
+        id: "left-pane-title",
+        content: "Processes",
+        fg: "#8BE9FD",
+        attributes: TextAttributes.BOLD,
+      }),
+    );
+    const rightPane = new BoxRenderable(renderer, {
+      id: "right-pane",
+      width: "50%",
+      flexDirection: "column",
+    });
+    rightPane.add(grid);
+    split.add(leftPane);
+    split.add(rightPane);
+    renderer.root.add(split);
+
+    // The collector populates the "process" store tag from the start (Feature 1
+    // reads it). No view yet, so it's forked straight to the store rather than
+    // registered as a render-tick panel.
+    yield* processes.stream.pipe(
+      Stream.runForEach((state) => store.set(state)),
+      Effect.forkScoped,
+    );
+  } else {
+    renderer.root.add(grid);
+  }
 
   // App-level debug line for RenderErrors (independent of which panels exist).
   const debugLine = new TextRenderable(renderer, {
@@ -206,13 +242,19 @@ const program = Effect.gen(function* () {
     Effect.forkScoped,
   );
 
-  // Block until the user presses `q` or Ctrl+C; returning closes the scope and
-  // tears everything down in reverse order (fibers interrupted, then renderer
-  // destroyed). See `awaitQuit` for why this matches parsed keys, not raw bytes.
-  yield* awaitQuit(renderer);
+  // Block until the InputRouter resolves its quit signal (mode-aware: Ctrl+C in
+  // any mode, bare `q` in Normal/Focus). Returning closes the scope and tears
+  // everything down in reverse order — fibers interrupted, then renderer destroyed.
+  yield* router.awaitQuit;
 });
 
-const AppLive = Layer.mergeAll(ConfigLive, MetricsStoreLive, CollectorsLive);
+const AppLive = Layer.mergeAll(
+  ConfigLive,
+  MetricsStoreLive,
+  CollectorsLive,
+  // One renderer instance, shared by the program and the InputRouter.
+  InputRouterLive.pipe(Layer.provideMerge(RendererLive)),
+);
 
 BunRuntime.runMain(
   Effect.scoped(Effect.provide(program, AppLive)).pipe(

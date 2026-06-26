@@ -1,0 +1,188 @@
+import { cc } from "bun:ffi";
+import { Duration, Effect, Layer } from "effect";
+import { ProcessCollector } from "../services/process-collector.ts";
+import { CollectorError } from "../types/errors.ts";
+import type { ProcessListSnapshot, ProcessStatus } from "../types/metrics.ts";
+import { collectorStream } from "./collector-stream.ts";
+import {
+  assembleRecords,
+  clampPercent,
+  type RawProcess,
+  toSnapshot,
+} from "./process-common.ts";
+import source from "./proc-macos.c" with { type: "file" };
+
+/**
+ * macOS process collector. macOS has no `/proc`, so per-process data comes from
+ * libproc via a Bun FFI helper (`proc-macos.c`) — no subprocess, sub-second, full
+ * untruncated command names. Like the other stateful collectors, **instantaneous**
+ * CPU% comes from diffing two samples of each process's cumulative CPU time over
+ * the elapsed wall interval (not the lifetime average `ps`/`top` report), then
+ * normalizing by core count so a fully-busy machine reads ~100%.
+ */
+
+const COLLECTOR = "process";
+
+/** Numeric fields per process emitted by `read_processes` (keep in sync with the C). */
+const NFIELDS = 7;
+/** Field offsets within each NFIELDS-wide record. */
+const F_PID = 0;
+const F_CPU_NS = 2;
+const F_RSS = 3;
+const F_STATUS = 5;
+const F_NAME_LEN = 6;
+
+/** Upper bound on processes read in one call; sizes the numeric output buffer. */
+const MAX_PROCS = 8192;
+/** Byte capacity for the concatenated name buffer (paths can be long). */
+const NAMES_CAP = 4_000_000;
+
+/** Gap between the two cumulative CPU-time samples used for the instantaneous %. */
+const SAMPLE_INTERVAL = Duration.millis(500);
+/** `read` already blocks ~500ms for its own delta, so add only a small gap. */
+const POLL_GAP = Duration.millis(750);
+
+/** macOS `pbi_status` codes → the normalized {@link ProcessStatus} union. */
+const macStatus = (code: number): ProcessStatus => {
+  switch (code) {
+    case 1:
+      return "idle"; // SIDL
+    case 2:
+      return "running"; // SRUN
+    case 3:
+      return "sleeping"; // SSLEEP
+    case 4:
+      return "stopped"; // SSTOP
+    case 5:
+      return "zombie"; // SZOMB
+    default:
+      return "unknown";
+  }
+};
+
+/**
+ * Compile `proc-macos.c` once with Bun's `cc` and bind `read_processes`, plus the
+ * reusable output buffers. Lazy + memoized (not at module load) for the same
+ * reason as the per-core collector: this file is statically imported on every
+ * platform for layer selection, but the libproc symbols only link on macOS, so a
+ * compile/link failure should surface as a recoverable `CollectorError` here
+ * rather than crashing the import on Linux.
+ */
+interface Bound {
+  readonly read: (
+    out: BigUint64Array,
+    maxProcs: number,
+    names: Uint8Array,
+    namesCap: number,
+    namesUsed: Int32Array,
+  ) => number;
+  readonly numBuf: BigUint64Array;
+  readonly nameBuf: Uint8Array;
+  readonly usedBuf: Int32Array;
+}
+let bound: Bound | null = null;
+const load = (): Bound => {
+  if (bound === null) {
+    const { symbols } = cc({
+      source,
+      symbols: {
+        read_processes: {
+          args: ["ptr", "int", "ptr", "int", "ptr"],
+          returns: "int",
+        },
+      },
+    });
+    bound = {
+      read: symbols.read_processes,
+      numBuf: new BigUint64Array(MAX_PROCS * NFIELDS),
+      nameBuf: new Uint8Array(NAMES_CAP),
+      usedBuf: new Int32Array(1),
+    };
+  }
+  return bound;
+};
+
+const decoder = new TextDecoder();
+
+/** One sample: the decoded process list plus a monotonic timestamp (ns) for the diff. */
+interface Sample {
+  readonly procs: RawProcess[];
+  readonly atNs: number;
+}
+
+/**
+ * Read one snapshot from libproc and decode the flat FFI buffers into structured
+ * processes. Returns `null` if PID enumeration failed (count < 0). `atNs` is taken
+ * right after the read so the two-sample elapsed time matches the CPU counters.
+ */
+const sampleProcesses = (): Sample | null => {
+  const b = load();
+  const count = b.read(b.numBuf, MAX_PROCS, b.nameBuf, NAMES_CAP, b.usedBuf);
+  const atNs = Number(Bun.nanoseconds());
+  if (count < 0) return null;
+
+  const procs: RawProcess[] = [];
+  let nameOff = 0;
+  for (let i = 0; i < count; i++) {
+    const base = i * NFIELDS;
+    const nameLen = Number(b.numBuf[base + F_NAME_LEN]!);
+    const name =
+      nameLen > 0
+        ? decoder.decode(b.nameBuf.subarray(nameOff, nameOff + nameLen))
+        : "";
+    nameOff += nameLen;
+    procs.push({
+      pid: Number(b.numBuf[base + F_PID]!),
+      cpuCumulative: Number(b.numBuf[base + F_CPU_NS]!),
+      memBytes: Number(b.numBuf[base + F_RSS]!),
+      status: macStatus(Number(b.numBuf[base + F_STATUS]!)),
+      name,
+    });
+  }
+  return { procs, atNs };
+};
+
+const sample: Effect.Effect<Sample, CollectorError> = Effect.try({
+  try: () => {
+    const s = sampleProcesses();
+    if (s === null) throw new Error("proc_listpids returned no PIDs");
+    return s;
+  },
+  catch: (cause) =>
+    new CollectorError({
+      collector: COLLECTOR,
+      reason: "libproc read_processes failed",
+      cause,
+    }),
+});
+
+/** Logical core count, used to normalize CPU% to share-of-machine. */
+const CORE_COUNT = Math.max(1, navigator.hardwareConcurrency);
+
+/** One reading: sample, wait, sample again, diff cumulative CPU into instantaneous %. */
+const read: Effect.Effect<ProcessListSnapshot, CollectorError> = Effect.gen(
+  function* () {
+    const first = yield* sample;
+    yield* Effect.sleep(SAMPLE_INTERVAL);
+    const second = yield* sample;
+
+    // CPU% = Δcpu_ns / (Δwall_ns × cores) × 100 → share of total machine CPU.
+    const denom = (second.atNs - first.atNs) * CORE_COUNT;
+    const cpuPercentOf = (prev: number | undefined, next: number): number =>
+      prev === undefined || denom <= 0
+        ? 0
+        : clampPercent(((next - prev) / denom) * 100);
+
+    const prevCpu = new Map(first.procs.map((p) => [p.pid, p.cpuCumulative]));
+    const records = assembleRecords(prevCpu, second.procs, cpuPercentOf);
+    return yield* toSnapshot(records, COLLECTOR);
+  },
+);
+
+const stream = collectorStream("process", read, POLL_GAP);
+
+/** Live macOS implementation of {@link ProcessCollector}. */
+export const ProcessCollectorMacOSLive = Layer.succeed(
+  ProcessCollector,
+  ProcessCollector.of({ read, stream }),
+);

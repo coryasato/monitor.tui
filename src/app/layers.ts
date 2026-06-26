@@ -9,6 +9,8 @@ import { MemoryCollectorLinuxLive } from "../collectors/memory-linux.ts";
 import { MemoryCollectorMacOSLive } from "../collectors/memory-macos.ts";
 import { NetworkCollectorLinuxLive } from "../collectors/network-linux.ts";
 import { NetworkCollectorMacOSLive } from "../collectors/network-macos.ts";
+import { ProcessCollectorLinuxLive } from "../collectors/process-linux.ts";
+import { ProcessCollectorMacOSLive } from "../collectors/process-macos.ts";
 
 /**
  * Platform layer selection. Every collector is an Effect Service (`Context.Tag`);
@@ -36,4 +38,5 @@ export const CollectorsLive = Layer.mergeAll(
   forPlatform(MemoryCollectorLinuxLive, MemoryCollectorMacOSLive),
   forPlatform(NetworkCollectorLinuxLive, NetworkCollectorMacOSLive),
   forPlatform(DiskCollectorLinuxLive, DiskCollectorMacOSLive),
+  forPlatform(ProcessCollectorLinuxLive, ProcessCollectorMacOSLive),
 );

@@ -16,6 +16,8 @@ export interface AppConfig {
   readonly network: { readonly enabled: boolean };
   /** Disk collector + readout. */
   readonly disk: { readonly enabled: boolean };
+  /** Process collector + table (left pane). When disabled the layout is full-width widgets. */
+  readonly process: { readonly enabled: boolean };
   /** CPU history sparkline width (number of samples shown). */
   readonly sparkline: { readonly width: number };
 }
@@ -28,5 +30,6 @@ export const defaultConfig: AppConfig = {
   memory: { enabled: true },
   network: { enabled: true },
   disk: { enabled: true },
+  process: { enabled: true },
   sparkline: { width: 40 },
 };
