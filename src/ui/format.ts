@@ -2,6 +2,15 @@
 
 const KIB = 1024;
 const MIB = 1024 * 1024;
+const GIB = 1024 * 1024 * 1024;
+
+/** Human-readable byte size: B → KiB → MiB → GiB (binary units, like the MEM gauge). */
+export function formatBytes(bytes: number): string {
+  if (bytes >= GIB) return `${(bytes / GIB).toFixed(1)} GiB`;
+  if (bytes >= MIB) return `${(bytes / MIB).toFixed(1)} MiB`;
+  if (bytes >= KIB) return `${(bytes / KIB).toFixed(1)} KiB`;
+  return `${Math.round(bytes)} B`;
+}
 
 /** Human-readable byte rate: B/s → KB/s → MB/s. */
 export function formatRate(bytesPerSec: number): string {

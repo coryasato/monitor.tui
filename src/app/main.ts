@@ -2,7 +2,6 @@ import { BunRuntime } from "@effect/platform-bun";
 import {
   BoxRenderable,
   type Renderable,
-  TextAttributes,
   TextRenderable,
 } from "@opentui/core";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
@@ -24,6 +23,7 @@ import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
 import { makeDiskReadout } from "../ui/components/disk-readout.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
 import { makeNetworkReadout } from "../ui/components/network-readout.ts";
+import { makeProcessTable } from "../ui/components/process-table.ts";
 import { CollectorsLive } from "./layers.ts";
 
 /**
@@ -136,9 +136,9 @@ const program = Effect.gen(function* () {
     grid.add(cell);
   }
 
-  // Layout. With the process panel enabled we split into two columns — an
-  // (initially empty) left pane that Feature 1 fills with the process table, and
-  // the widget grid on the right. Disabled → the original full-width grid.
+  // Layout. With the process panel enabled we split into two columns — the
+  // process table on the left, the widget grid on the right. Disabled → the
+  // original full-width grid.
   if (config.process.enabled) {
     // `flexGrow: 1` (not `height: "100%"`) so the split fills the space left after
     // the debug line. Yoga's default `flexShrink` is 0, so a `height: "100%"`
@@ -149,37 +149,27 @@ const program = Effect.gen(function* () {
       width: "100%",
       flexGrow: 1,
     });
-    const leftPane = new BoxRenderable(renderer, {
-      id: "left-pane",
-      width: "50%",
-      borderStyle: "rounded",
-      padding: 1,
-      flexDirection: "column",
-    });
-    leftPane.add(
-      new TextRenderable(renderer, {
-        id: "left-pane-title",
-        content: "Processes",
-        fg: "#8BE9FD",
-        attributes: TextAttributes.BOLD,
-      }),
-    );
+    const table = makeProcessTable(renderer);
+    table.root.width = "50%";
     const rightPane = new BoxRenderable(renderer, {
       id: "right-pane",
       width: "50%",
       flexDirection: "column",
     });
     rightPane.add(grid);
-    split.add(leftPane);
+    split.add(table.root);
     split.add(rightPane);
     renderer.root.add(split);
 
-    // The collector populates the "process" store tag from the start (Feature 1
-    // reads it). No view yet, so it's forked straight to the store rather than
-    // registered as a render-tick panel.
-    yield* processes.stream.pipe(
-      Stream.runForEach((state) => store.set(state)),
-      Effect.forkScoped,
+    // The table is a render-tick panel like the widgets (data tick → update);
+    // its Normal-mode key handlers route through the InputRouter.
+    panels.push({
+      tag: "process",
+      stream: processes.stream,
+      apply: (state) => table.update(state),
+    });
+    yield* router.register("Normal", (key) =>
+      Effect.sync(() => table.onKey(key)),
     );
   } else {
     renderer.root.add(grid);

@@ -24,6 +24,86 @@ children are killed on monitor quit by default* (`--no-kill-on-exit` to detach).
 
 ---
 
+## Status — Features 0 & 1 complete; next up: Feature 2
+
+Both shipped with `tsc --noEmit` + `bun test` green and a PTY smoke test
+(boots, renders, clean SIGINT, no orphaned collectors). This section is the
+warm-start summary of the seams Features 2–6 consume — read it before the specs
+below so you don't re-derive what already exists.
+
+**Data / types** (`src/types/metrics.ts`)
+- `MetricSnapshot` union includes `"process"` (`ProcessListSnapshot`). Brands:
+  `ProcessId`, `Percent`, `Bytes`; `ProcessStatus` union; `ProcessRecord`
+  (`pid`, `name` = full path, `cpuPercent`, `memBytes`, `status`).
+
+**Process collector** (data source for Features 2 & 4)
+- `ProcessCollector` service (`src/services/process-collector.ts`); macOS Layer
+  = libproc FFI (`collectors/proc-macos.c` + `process-macos.ts`), Linux Layer
+  (`process-linux.ts`); shared pure diff/validate in `process-common.ts`.
+- CPU% is **instantaneous** (two-sample diff) normalized to share-of-machine, so
+  it stays in `[0,100]`.
+- **The C already emits `ppid` (field 1) and `threadnum` (field 4)**; TS only
+  reads pid/cpu/rss/status/name today. Feature 2 (thread count) and Feature 4
+  (ppid→subtree walk) can read those existing fields with **no C change**. For
+  Feature 2 FDs you must add a `PROC_PIDLISTFDS` call (macOS) / `/proc/<pid>/fd`
+  count (Linux) — MVP may return `null` (type allows it), never per-tick `lsof`.
+
+**Renderer + input** (`src/services/renderer.ts`, `src/services/input-router.ts`)
+- `Renderer` service/Layer owns `createCliRenderer`/`destroy`; get it via
+  `yield* Renderer`. `RendererLive` is shared with the router via
+  `InputRouterLive.pipe(Layer.provideMerge(RendererLive))` in `main.ts`.
+- `InputRouter`: one keypress subscription. API: `register(mode, handler)`,
+  `setMode(mode)`, `mode`, `awaitQuit`. Modes: `Normal | Filter | Focus | Modal`.
+  Quit is mode-aware (`isQuitForMode`: Ctrl+C always; bare `q` only Normal/Focus).
+  Handlers are `(InputKey) => Effect<void>` run **synchronously** in the keypress
+  callback — must not suspend; mutate UI state then call `renderer.requestRender()`.
+- Feature 2 registers `Focus`-mode handlers and calls `setMode("Focus")` on pin /
+  `setMode("Normal")` on unpin; Feature 3 uses `Filter`; Feature 5 uses `Modal`.
+
+**Redraw contract** (proven by `ui/components/process-table.ts`)
+- Component shape: `update(state)` (data tick — caches snapshot, repaints, **no**
+  paint request) + UI-state mutators (input — mutate + **immediate**
+  `renderer.requestRender()`). The render-tick `panels` array in `main.ts` calls
+  `apply: (s) => component.update(s)` on signature change.
+
+**UI seams**
+- `ProcessTable.getSelection(): ProcessRecord | null` — **Feature 2 pins this on
+  `Enter`** (register an `Enter`/`"return"` handler in Normal mode).
+- Layout: `split` (`flexGrow:1`, row) → left `table.root` (50%) + `rightPane`
+  (50%, holds the widget `grid`). **Feature 2 swaps `rightPane`'s content**
+  (widgets ↔ `ProcessFocusPanel`) driven by a `Ref<Option<ProcessId>>` pin state.
+- Sparklines: reuse `ui/components/cpu-sparkline.ts` (`makeCpuSparkline`,
+  `appendCapped`, `renderSparkline`, `sparkGlyph`) for Feature 2's per-PID graphs.
+- Formatters: `formatBytes`, `formatRate` in `ui/format.ts`. New collectors reuse
+  `collectors/collector-stream.ts` `collectorStream(tag, read, gap)`.
+
+**Gotchas discovered (save yourself the debugging)**
+- Yoga default `flexShrink` is **0** → a `height:"100%"` child overflows siblings;
+  use `flexGrow:1` to fill remaining space.
+- `Renderable.visible = false` sets Yoga `display:none` (excluded from layout) —
+  this is how the table windows rows (a pool + toggling visibility).
+- OpenTUI does **not** re-export `ParsedKey`/`KeyEvent` from the package root and
+  its `exports` map blocks deep imports → use the local `InputKey` structural type.
+- Parsed key names: Enter = `"return"`, Esc = `"escape"`, arrows
+  `up/down/left/right`; printable text is in `key.sequence` (for Filter mode).
+- Only import from `@opentui/core` and `@opentui/core/testing`.
+- Tests: a table/panel root needs an explicit `height` under `createTestRenderer`
+  (no `flexGrow` parent there); drive keys via `mockInput` + parsed `KeyEvent`.
+- libproc skips processes whose taskinfo is unreadable (other users without
+  privilege) — the table shows what the current user can read.
+
+**Model recommendation for Feature 2:** prefer **Opus**. The UI work (right-pane
+swap, sparklines, stats row) is straightforward on the seams above, but the
+collector lifecycle is the risk: a PID-scoped `collectorStream` forked into a
+scope opened on pin / closed on unpin (`acquireRelease` finalizer), exit
+detection (attached PID vanishing from a sample → auto-unpin + toast), and a new
+libproc FD call. That Effect-scope + FFI nuance is safer on Opus. If you do use
+Sonnet, start FDs at the `null` MVP and lean on the acquireRelease pattern in the
+existing collectors. **Feature 3 (Search/Filter)** is far more self-contained
+(pure filtering + the existing `Filter` mode seam) and is a good Sonnet candidate.
+
+---
+
 ## Next Features
 
 Each item is self-contained: a future session starts cold with only the repo
@@ -32,7 +112,7 @@ start is in the item.
 
 ---
 
-### 0 — Foundation
+### 0 — Foundation ✅ COMPLETE
 
 **Goal:** the shared infrastructure every interactive feature builds on — split
 layout, input routing, the redraw model, and the libproc process collector. This
@@ -138,7 +218,7 @@ router + redraw contracts are validated by a real consumer while their design is
 
 ---
 
-### 1 — Process List Panel
+### 1 — Process List Panel ✅ COMPLETE
 
 **Goal:** the scrollable process table that fills the left pane, on top of the Feature 0 foundation.
 
