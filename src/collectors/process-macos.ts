@@ -1,13 +1,21 @@
 import { cc } from "bun:ffi";
-import { Duration, Effect, Layer } from "effect";
+import { Duration, Effect, Layer, type Stream } from "effect";
 import { ProcessCollector } from "../services/process-collector.ts";
 import { CollectorError } from "../types/errors.ts";
-import type { ProcessListSnapshot, ProcessStatus } from "../types/metrics.ts";
+import type {
+  MetricState,
+  ProcessFocusSnapshot,
+  ProcessId,
+  ProcessListSnapshot,
+  ProcessStatus,
+} from "../types/metrics.ts";
 import { collectorStream } from "./collector-stream.ts";
 import {
   assembleRecords,
   clampPercent,
+  memPercentOf,
   type RawProcess,
+  toFocusSnapshot,
   toSnapshot,
 } from "./process-common.ts";
 import source from "./proc-macos.c" with { type: "file" };
@@ -29,6 +37,7 @@ const NFIELDS = 7;
 const F_PID = 0;
 const F_CPU_NS = 2;
 const F_RSS = 3;
+const F_THREADS = 4;
 const F_STATUS = 5;
 const F_NAME_LEN = 6;
 
@@ -181,8 +190,125 @@ const read: Effect.Effect<ProcessListSnapshot, CollectorError> = Effect.gen(
 
 const stream = collectorStream("process", read, POLL_GAP);
 
+// --- Focus view (single pinned process, Feature 2) -------------------------
+//
+// The focus reader reuses the **same** `read_processes` FFI module as the table,
+// filtered to the pinned PID, rather than a second per-PID libproc reader. A
+// dedicated second libproc `cc` module (a `read_process_focus` doing
+// `proc_pidinfo` for one PID) proved unusable here: once `read_processes` had run
+// in the process, that second module's `proc_pidinfo` permanently returned -1 for
+// even a live PID (a Bun/TinyCC interaction between two libproc modules). Two
+// callers of the *one* `read_processes` module are fine. Threads come from field
+// 4 of the existing record (already emitted by the C). FD count is **not**
+// available this way, so on macOS `openFds` is `null` (the plan's sanctioned MVP
+// fallback — never a per-tick `lsof`).
+// TODO(macos-fds): surface a real FD count without a second libproc module —
+// e.g. extend `read_processes` to emit per-PID FD counts via PROC_PIDLISTFDS only
+// for the pinned PID, or revisit once Bun's multi-module FFI is fixed.
+
+const FOCUS_COLLECTOR = "process-focus";
+
+/** The pinned process's raw counters extracted from one `read_processes` sample. */
+interface FocusSample {
+  readonly cpuCumulative: number;
+  readonly memBytes: number;
+  readonly threads: number;
+  readonly status: ProcessStatus;
+  readonly name: string;
+  readonly atNs: number;
+}
+
+/**
+ * Scan one `read_processes` snapshot for `pid` and extract its focus fields.
+ * Returns `null` if the snapshot failed or the PID is absent (exited) — the
+ * caller turns that into a recoverable error so the focus stream reports
+ * `unavailable`, which (with the exit check on the list) signals exit. The scan
+ * walks the concatenated name buffer in lockstep up to the matched record.
+ */
+const sampleFocus = (pid: number): FocusSample | null => {
+  const b = load();
+  const count = b.read(b.numBuf, MAX_PROCS, b.nameBuf, NAMES_CAP, b.usedBuf);
+  const atNs = Number(Bun.nanoseconds());
+  if (count < 0) return null;
+
+  let nameOff = 0;
+  for (let i = 0; i < count; i++) {
+    const base = i * NFIELDS;
+    const nameLen = Number(b.numBuf[base + F_NAME_LEN]!);
+    if (Number(b.numBuf[base + F_PID]!) === pid) {
+      const name =
+        nameLen > 0
+          ? decoder.decode(b.nameBuf.subarray(nameOff, nameOff + nameLen))
+          : "";
+      return {
+        cpuCumulative: Number(b.numBuf[base + F_CPU_NS]!),
+        memBytes: Number(b.numBuf[base + F_RSS]!),
+        threads: Number(b.numBuf[base + F_THREADS]!),
+        status: macStatus(Number(b.numBuf[base + F_STATUS]!)),
+        name,
+        atNs,
+      };
+    }
+    nameOff += nameLen;
+  }
+  return null; // pid not in the table → exited / unreadable
+};
+
+const sampleFocusEffect = (
+  pid: number,
+): Effect.Effect<FocusSample, CollectorError> =>
+  Effect.try({
+    try: () => {
+      const s = sampleFocus(pid);
+      if (s === null) throw new Error(`process ${pid} not found`);
+      return s;
+    },
+    catch: (cause) =>
+      new CollectorError({
+        collector: FOCUS_COLLECTOR,
+        reason: `process ${pid} unavailable`,
+        cause,
+      }),
+  });
+
+/** One focus reading for `pid`: sample, wait, sample again, diff CPU into instantaneous %. */
+const readFocus = (
+  pid: number,
+): Effect.Effect<ProcessFocusSnapshot, CollectorError> =>
+  Effect.gen(function* () {
+    const first = yield* sampleFocusEffect(pid);
+    yield* Effect.sleep(SAMPLE_INTERVAL);
+    const second = yield* sampleFocusEffect(pid);
+
+    // Same instantaneous formula as the list collector, scoped to one PID.
+    const denom = (second.atNs - first.atNs) * CORE_COUNT;
+    const cpuPercent =
+      denom <= 0
+        ? 0
+        : clampPercent(
+            ((second.cpuCumulative - first.cpuCumulative) / denom) * 100,
+          );
+
+    return yield* toFocusSnapshot(
+      {
+        pid,
+        name: second.name,
+        cpuPercent,
+        memBytes: second.memBytes,
+        memPercent: memPercentOf(second.memBytes),
+        threadCount: second.threads,
+        openFds: null, // see TODO(macos-fds) above
+        status: second.status,
+      },
+      FOCUS_COLLECTOR,
+    );
+  });
+
+const focusStream = (pid: ProcessId): Stream.Stream<MetricState> =>
+  collectorStream(FOCUS_COLLECTOR, readFocus(pid as number), POLL_GAP);
+
 /** Live macOS implementation of {@link ProcessCollector}. */
 export const ProcessCollectorMacOSLive = Layer.succeed(
   ProcessCollector,
-  ProcessCollector.of({ read, stream }),
+  ProcessCollector.of({ read, stream, focusStream }),
 );

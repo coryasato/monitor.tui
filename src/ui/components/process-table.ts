@@ -48,6 +48,10 @@ export interface ProcessTable {
   readonly getSelection: () => ProcessRecord | null;
   /** The active sort column. */
   readonly getSortKey: () => SortKey;
+  /** Whether a kill confirm is open — Feature 2 suppresses `Enter`-to-pin while it is. */
+  readonly isAwaitingConfirm: () => boolean;
+  /** Show a transient toast in the footer (e.g. Feature 2's "PID exited" notice). */
+  readonly notify: (message: string) => void;
 }
 
 const clamp = (n: number, lo: number, hi: number): number =>
@@ -418,7 +422,20 @@ export function makeProcessTable(
     if (!renderer.isDestroyed) draw(true);
   });
 
+  const notify = (message: string): void => {
+    setToast(message);
+    draw(true);
+  };
+
   draw(false);
 
-  return { root, update, onKey, getSelection, getSortKey: () => sortKey };
+  return {
+    root,
+    update,
+    onKey,
+    getSelection,
+    getSortKey: () => sortKey,
+    isAwaitingConfirm: () => pendingKill !== null,
+    notify,
+  };
 }

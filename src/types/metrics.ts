@@ -137,6 +137,30 @@ export interface ProcessListSnapshot {
 }
 
 /**
+ * A single pinned process at a point in time — the data behind the focus view
+ * (Feature 2). Sourced from the same libproc/`/proc` collector as
+ * {@link ProcessListSnapshot} but scoped to one PID, so `cpuPercent` is the same
+ * **instantaneous** two-sample diff normalized to share-of-machine. `memPercent`
+ * is `memBytes` as a share of total system memory, so the focus memory sparkline
+ * is comparable with the MEM gauge. `openFds` is `null` when the FD count is
+ * unavailable (never sourced from a per-tick `lsof`). Because only one process is
+ * ever pinned, this is stored under the single stable `"process-focus"` tag —
+ * each sample overwrites the last.
+ */
+export interface ProcessFocusSnapshot {
+  readonly _tag: "process-focus";
+  readonly at: Timestamp;
+  readonly pid: ProcessId;
+  readonly name: string;
+  readonly cpuPercent: Percent;
+  readonly memBytes: Bytes;
+  readonly memPercent: Percent;
+  readonly threadCount: number;
+  readonly openFds: number | null;
+  readonly status: ProcessStatus;
+}
+
+/**
  * Discriminated union of all metric snapshots, keyed by `_tag`. New collectors
  * add a member here.
  */
@@ -146,7 +170,8 @@ export type MetricSnapshot =
   | MemorySnapshot
   | NetworkSnapshot
   | DiskSnapshot
-  | ProcessListSnapshot;
+  | ProcessListSnapshot
+  | ProcessFocusSnapshot;
 
 /** The `_tag` of any metric snapshot — used as the key into the MetricsStore. */
 export type MetricTag = MetricSnapshot["_tag"];

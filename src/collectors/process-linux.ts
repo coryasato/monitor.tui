@@ -1,13 +1,21 @@
 import { readdir } from "node:fs/promises";
-import { Duration, Effect, Layer } from "effect";
+import { Duration, Effect, Layer, type Stream } from "effect";
 import { ProcessCollector } from "../services/process-collector.ts";
 import { CollectorError } from "../types/errors.ts";
-import type { ProcessListSnapshot, ProcessStatus } from "../types/metrics.ts";
+import type {
+  MetricState,
+  ProcessFocusSnapshot,
+  ProcessId,
+  ProcessListSnapshot,
+  ProcessStatus,
+} from "../types/metrics.ts";
 import { collectorStream } from "./collector-stream.ts";
 import {
   assembleRecords,
   clampPercent,
+  memPercentOf,
   type RawProcess,
+  toFocusSnapshot,
   toSnapshot,
 } from "./process-common.ts";
 
@@ -193,8 +201,95 @@ const read: Effect.Effect<ProcessListSnapshot, CollectorError> = Effect.gen(
 
 const stream = collectorStream("process", read, POLL_GAP);
 
+// --- Focus view (single pinned process, Feature 2) -------------------------
+
+const FOCUS_COLLECTOR = "process-focus";
+
+/** Count entries in `/proc/<pid>/fd` (the open file descriptors), or `null` if unreadable. */
+const countFds = async (pid: number): Promise<number | null> => {
+  try {
+    return (await readdir(`/proc/${pid}/fd`)).length;
+  } catch {
+    return null; // typically EACCES for a process owned by another user
+  }
+};
+
+/** One focus sample: the pinned process's stat plus the total-jiffies denominator and FD count. */
+interface FocusSample {
+  readonly stat: ProcPidStat;
+  readonly totalJiffies: number;
+  readonly openFds: number | null;
+  readonly name: string;
+}
+
+/**
+ * Read one `/proc` sample for a single PID. Returns `null` if the process is gone
+ * or its stat is unreadable — the caller turns that into a recoverable error so
+ * the focus stream reports `unavailable`, which signals exit.
+ */
+const sampleFocus = (
+  pid: number,
+): Effect.Effect<FocusSample, CollectorError> =>
+  Effect.tryPromise({
+    try: async (): Promise<FocusSample> => {
+      const stat = parseProcPidStat(await Bun.file(`/proc/${pid}/stat`).text());
+      if (stat === null) throw new Error(`bad /proc/${pid}/stat`);
+      const totalJiffies = parseTotalJiffies(
+        await Bun.file("/proc/stat").text(),
+      );
+      if (totalJiffies === null) throw new Error("could not parse /proc/stat");
+      const cmdline = await readCmdline(pid);
+      const openFds = await countFds(pid);
+      return { stat, totalJiffies, openFds, name: cmdline ?? stat.comm };
+    },
+    catch: (cause) =>
+      new CollectorError({
+        collector: FOCUS_COLLECTOR,
+        reason: `process ${pid} unavailable`,
+        cause,
+      }),
+  });
+
+/** One focus reading for `pid`: sample, wait, sample again, diff jiffies into instantaneous %. */
+const readFocus = (
+  pid: number,
+): Effect.Effect<ProcessFocusSnapshot, CollectorError> =>
+  Effect.gen(function* () {
+    const first = yield* sampleFocus(pid);
+    yield* Effect.sleep(SAMPLE_INTERVAL);
+    const second = yield* sampleFocus(pid);
+
+    // Same instantaneous formula as the list collector, scoped to one PID.
+    const totalDelta = second.totalJiffies - first.totalJiffies;
+    const cpuPercent =
+      totalDelta <= 0
+        ? 0
+        : clampPercent(
+            ((second.stat.cpuJiffies - first.stat.cpuJiffies) / totalDelta) *
+              100,
+          );
+    const memBytes = second.stat.rssPages * PAGE_SIZE;
+
+    return yield* toFocusSnapshot(
+      {
+        pid,
+        name: second.name,
+        cpuPercent,
+        memBytes,
+        memPercent: memPercentOf(memBytes),
+        threadCount: second.stat.threads,
+        openFds: second.openFds,
+        status: linuxStatus(second.stat.state),
+      },
+      FOCUS_COLLECTOR,
+    );
+  });
+
+const focusStream = (pid: ProcessId): Stream.Stream<MetricState> =>
+  collectorStream(FOCUS_COLLECTOR, readFocus(pid as number), POLL_GAP);
+
 /** Live Linux implementation of {@link ProcessCollector}. */
 export const ProcessCollectorLinuxLive = Layer.succeed(
   ProcessCollector,
-  ProcessCollector.of({ read, stream }),
+  ProcessCollector.of({ read, stream, focusStream }),
 );

@@ -1,6 +1,10 @@
 import { Context, type Effect, type Stream } from "effect";
 import type { CollectorError } from "../types/errors.ts";
-import type { MetricState, ProcessListSnapshot } from "../types/metrics.ts";
+import type {
+  MetricState,
+  ProcessId,
+  ProcessListSnapshot,
+} from "../types/metrics.ts";
 
 /**
  * Service that reads the system process table. This is the *interface* — platform
@@ -20,5 +24,14 @@ export class ProcessCollector extends Context.Tag("ProcessCollector")<
      * terminates — consumers just keep receiving the latest state.
      */
     readonly stream: Stream.Stream<MetricState>;
+    /**
+     * A PID-scoped stream for the focus view (Feature 2): each sample is a
+     * {@link MetricState} carrying a `process-focus` snapshot for `pid` alone
+     * (instantaneous CPU% + threads + FD count). Like {@link stream} it never
+     * fails — but a sample becomes `unavailable` once the process is gone, which
+     * is how exit is detected. The caller forks this into a scope opened on pin
+     * and closed on unpin, so no focus collection runs while nothing is pinned.
+     */
+    readonly focusStream: (pid: ProcessId) => Stream.Stream<MetricState>;
   }
 >() {}

@@ -24,12 +24,14 @@ children are killed on monitor quit by default* (`--no-kill-on-exit` to detach).
 
 ---
 
-## Status — Features 0 & 1 complete; next up: Feature 2
+## Status — Features 0–2 complete; next up: Feature 3
 
-Both shipped with `tsc --noEmit` + `bun test` green and a PTY smoke test
+All shipped with `tsc --noEmit` + `bun test` green and a PTY smoke test
 (boots, renders, clean SIGINT, no orphaned collectors). This section is the
-warm-start summary of the seams Features 2–6 consume — read it before the specs
-below so you don't re-derive what already exists.
+warm-start summary of the seams Features 3–6 consume — read it before the specs
+below so you don't re-derive what already exists. **Feature 2's own seams (focus
+snapshot, `focusStream`, the macOS multi-libproc-module FFI gotcha, exit
+detection) are summarized under "### 2 — Process Focus View ✅ COMPLETE".**
 
 **Data / types** (`src/types/metrics.ts`)
 - `MetricSnapshot` union includes `"process"` (`ProcessListSnapshot`). Brands:
@@ -244,7 +246,43 @@ a process can be killed interactively (PID-anchored selection, EPERM toast).
 
 ---
 
-### 2 — Process Focus View
+### 2 — Process Focus View ✅ COMPLETE
+
+Shipped green (`tsc --noEmit` + `bun test`, plus a real-pty smoke: boot → `Enter`
+pins → Focus panel with live CPU/MEM sparklines + stats → `Escape` unpins →
+external kill fires the exit toast). Seams Features 4 & 5 consume:
+
+- **Types** (`src/types/metrics.ts`): `ProcessFocusSnapshot` (`_tag:
+  "process-focus"`; `pid`, `name`, `cpuPercent`, `memBytes`, `memPercent`,
+  `threadCount`, `openFds: number | null`, `status`) in the `MetricSnapshot`
+  union. The PID-scoped focus stream writes it to the store under the single
+  stable `"process-focus"` tag — each sample overwrites the last.
+- **Collector**: `ProcessCollector.focusStream(pid)` (`process-{macos,linux}.ts`),
+  forked into a `Scope.make()` opened on pin / closed on unpin via
+  `Effect.forkIn` + `Fiber.interruptFork` (see `main.ts` focus-lifecycle block).
+  Pure assembly in `process-common.ts` (`toFocusSnapshot`, `memPercentOf` using
+  `os.totalmem()`). CPU% is the same two-sample instantaneous diff as the table.
+- **⚠️ macOS FFI gotcha (cost me hours — read before touching the C):** you
+  **cannot** run a *second* libproc TinyCC module alongside `read_processes`.
+  A dedicated per-PID `read_process_focus` (its own `proc_pidinfo`) **permanently**
+  starts returning -1 for even a live PID once `read_processes` has run — across
+  separate `cc()` calls *and* separate `.c` files, and it stays broken after the
+  list stops. Two callers of the *one* `read_processes` module are fine. So macOS
+  focus reuses `read_processes` filtered to the PID (threads = field 4, already
+  emitted). **Consequence: `openFds` is `null` on macOS** (the sanctioned MVP
+  fallback — never `lsof`); see `TODO(macos-fds)` in `process-macos.ts`. **Linux**
+  uses a dedicated `/proc/<pid>` reader with **real** `openFds` (no FFI, no
+  interference).
+- **Exit detection** (attached PID): the render-tick `checkFocusExit` in `main.ts`
+  unpins + toasts (`table.notify`) when the pinned PID vanishes from the
+  `"process"` snapshot (≤ one poll interval). Feature 4's launched child will
+  instead use its precise `child.exited` handle.
+- **UI**: `ProcessFocusPanel` (`ui/components/process-focus-panel.ts`) —
+  `prime(pid, name)` on pin (resets history), `update(state)` per redraw contract.
+  Right pane swaps grid↔panel via `visible` toggle (no tree churn). Table gained
+  `getSelection()` consumer + `isAwaitingConfirm()` / `notify()`.
+
+**Original spec (for reference):**
 
 **Goal:** pin a process from the table; the right half of the layout switches from the widget stack to a dedicated live view for that PID.
 

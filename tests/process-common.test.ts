@@ -3,8 +3,11 @@ import { Effect, Exit } from "effect";
 import {
   assembleRecords,
   clampPercent,
+  memPercentOf,
+  type PlainFocus,
   type PlainRecord,
   type RawProcess,
+  toFocusSnapshot,
   toSnapshot,
 } from "../src/collectors/process-common.ts";
 
@@ -87,6 +90,65 @@ describe("toSnapshot", () => {
 
   test("rejects a non-positive pid", () => {
     const exit = Effect.runSyncExit(toSnapshot([plain({ pid: 0 })], "process"));
+    expect(Exit.isFailure(exit)).toBe(true);
+  });
+});
+
+describe("memPercentOf", () => {
+  test("is a finite percentage in [0, 100] for a real byte count", () => {
+    const p = memPercentOf(1024 * 1024); // 1 MiB of whatever this box has
+    expect(p).toBeGreaterThanOrEqual(0);
+    expect(p).toBeLessThanOrEqual(100);
+    expect(Number.isFinite(p)).toBe(true);
+  });
+
+  test("clamps an absurd byte count to 100", () => {
+    expect(memPercentOf(Number.MAX_SAFE_INTEGER)).toBe(100);
+  });
+});
+
+describe("toFocusSnapshot", () => {
+  const plain = (overrides: Partial<PlainFocus> = {}): PlainFocus => ({
+    pid: 1234,
+    name: "/usr/bin/bun",
+    cpuPercent: 12.5,
+    memBytes: 2048,
+    memPercent: 1.5,
+    threadCount: 8,
+    openFds: 42,
+    status: "running",
+    ...overrides,
+  });
+
+  test("validates + brands a valid record into a process-focus snapshot", () => {
+    const snap = Effect.runSync(toFocusSnapshot(plain(), "process-focus"));
+    expect(snap._tag).toBe("process-focus");
+    expect(snap.pid as number).toBe(1234);
+    expect(snap.cpuPercent as number).toBe(12.5);
+    expect(snap.threadCount).toBe(8);
+    expect(snap.openFds).toBe(42);
+    expect(snap.status).toBe("running");
+  });
+
+  test("allows a null FD count (unavailable, never lsof)", () => {
+    const snap = Effect.runSync(toFocusSnapshot(plain({ openFds: null }), "process-focus"));
+    expect(snap.openFds).toBeNull();
+  });
+
+  test("fails with a CollectorError when cpuPercent is out of range", () => {
+    const exit = Effect.runSyncExit(
+      toFocusSnapshot(plain({ cpuPercent: 150 }), "process-focus"),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(JSON.stringify(exit.cause)).toContain("CollectorError");
+    }
+  });
+
+  test("rejects a fractional thread count", () => {
+    const exit = Effect.runSyncExit(
+      toFocusSnapshot(plain({ threadCount: 1.5 }), "process-focus"),
+    );
     expect(Exit.isFailure(exit)).toBe(true);
   });
 });

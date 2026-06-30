@@ -4,7 +4,18 @@ import {
   type Renderable,
   TextRenderable,
 } from "@opentui/core";
-import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
+import {
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Ref,
+  Schedule,
+  Scope,
+  Stream,
+} from "effect";
 import { Config, ConfigLive } from "../services/config.ts";
 import { CpuCoresCollector } from "../services/cpu-cores-collector.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
@@ -16,13 +27,19 @@ import { NetworkCollector } from "../services/network-collector.ts";
 import { ProcessCollector } from "../services/process-collector.ts";
 import { Renderer, RendererLive } from "../services/renderer.ts";
 import { RenderError } from "../types/errors.ts";
-import type { MetricState, MetricTag } from "../types/metrics.ts";
+import type {
+  MetricState,
+  MetricTag,
+  ProcessId,
+  ProcessRecord,
+} from "../types/metrics.ts";
 import { makeCpuCores } from "../ui/components/cpu-cores.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
 import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
 import { makeDiskReadout } from "../ui/components/disk-readout.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
 import { makeNetworkReadout } from "../ui/components/network-readout.ts";
+import { makeProcessFocusPanel } from "../ui/components/process-focus-panel.ts";
 import { makeProcessTable } from "../ui/components/process-table.ts";
 import { CollectorsLive } from "./layers.ts";
 
@@ -136,6 +153,10 @@ const program = Effect.gen(function* () {
     grid.add(cell);
   }
 
+  // Per-tick focus-exit check, wired below only when the process panel exists.
+  // Default no-op so the render-tick loop can call it unconditionally.
+  let checkFocusExit: Effect.Effect<void> = Effect.void;
+
   // Layout. With the process panel enabled we split into two columns — the
   // process table on the left, the widget grid on the right. Disabled → the
   // original full-width grid.
@@ -151,12 +172,26 @@ const program = Effect.gen(function* () {
     });
     const table = makeProcessTable(renderer);
     table.root.width = "50%";
+    const focusPanel = makeProcessFocusPanel(renderer, config.sparkline.width);
     const rightPane = new BoxRenderable(renderer, {
       id: "right-pane",
       width: "50%",
       flexDirection: "column",
     });
+    // Both right-pane children live in the tree; we swap which is shown by
+    // toggling `visible` (Yoga `display:none` excludes the hidden one from
+    // layout), rather than churning the tree on every pin/unpin.
     rightPane.add(grid);
+    rightPane.add(focusPanel.root);
+    focusPanel.root.visible = false;
+    const showWidgets = (): void => {
+      grid.visible = true;
+      focusPanel.root.visible = false;
+    };
+    const showFocus = (): void => {
+      grid.visible = false;
+      focusPanel.root.visible = true;
+    };
     split.add(table.root);
     split.add(rightPane);
     renderer.root.add(split);
@@ -168,9 +203,85 @@ const program = Effect.gen(function* () {
       stream: processes.stream,
       apply: (state) => table.update(state),
     });
+
+    // --- Focus view lifecycle (Feature 2) -----------------------------------
+    // The pinned PID and the PID-scoped focus collector fiber live in UI state.
+    // The collector is forked into a single closeable scope opened here and
+    // closed on program teardown, so a clean quit always interrupts it.
+    const pinnedRef = yield* Ref.make<Option.Option<ProcessId>>(Option.none());
+    const focusFiberRef =
+      yield* Ref.make<Option.Option<Fiber.RuntimeFiber<void>>>(Option.none());
+    const focusScope = yield* Scope.make();
+    yield* Effect.addFinalizer(() => Scope.close(focusScope, Exit.void));
+
+    const stopFocus = Effect.gen(function* () {
+      const prev = yield* Ref.getAndSet(focusFiberRef, Option.none());
+      // `interruptFork` (not `interrupt`) so this stays synchronously runnable
+      // inside the keypress handler — we don't block on the fiber's teardown.
+      if (Option.isSome(prev)) yield* Fiber.interruptFork(prev.value);
+    });
+
+    const unpin = Effect.gen(function* () {
+      yield* stopFocus;
+      yield* Ref.set(pinnedRef, Option.none());
+      showWidgets();
+      yield* router.setMode("Normal");
+      renderer.requestRender();
+    });
+
+    const pin = (sel: ProcessRecord): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        yield* stopFocus; // replace any prior pin
+        focusPanel.prime(sel.pid, sel.name);
+        yield* Ref.set(pinnedRef, Option.some(sel.pid));
+        const fiber = yield* processes.focusStream(sel.pid).pipe(
+          Stream.runForEach((state) =>
+            Effect.sync(() => {
+              focusPanel.update(Option.some(state));
+              renderer.requestRender();
+            }),
+          ),
+          Effect.forkIn(focusScope),
+        );
+        yield* Ref.set(focusFiberRef, Option.some(fiber));
+        showFocus();
+        yield* router.setMode("Focus");
+        renderer.requestRender();
+      });
+
+    // Normal mode: `Enter` pins the highlighted row (unless a kill confirm is
+    // open); every other key drives the table.
     yield* router.register("Normal", (key) =>
-      Effect.sync(() => table.onKey(key)),
+      key.name === "return"
+        ? Effect.suspend(() => {
+            if (table.isAwaitingConfirm()) return Effect.void;
+            const sel = table.getSelection();
+            return sel === null ? Effect.void : pin(sel);
+          })
+        : Effect.sync(() => table.onKey(key)),
     );
+    // Focus mode: `Escape` unpins; quit keys are handled by the router itself.
+    yield* router.register("Focus", (key) =>
+      key.name === "escape" ? unpin : Effect.void,
+    );
+
+    // Exit detection (attached PID): when the pinned process disappears from the
+    // process list, auto-unpin and toast. Runs once per render tick (≤ one poll
+    // interval of latency — the best-effort path the plan describes). A launched
+    // child (Feature 4) will instead signal exit precisely via its handle.
+    checkFocusExit = Effect.gen(function* () {
+      const pinned = yield* Ref.get(pinnedRef);
+      if (Option.isNone(pinned)) return;
+      const state = yield* store.get("process");
+      if (Option.isNone(state)) return;
+      const s = state.value;
+      if (s._tag !== "ok" || s.snapshot._tag !== "process") return;
+      const present = s.snapshot.processes.some((p) => p.pid === pinned.value);
+      if (!present) {
+        table.notify(`PID ${pinned.value as number} exited`);
+        yield* unpin;
+      }
+    });
   } else {
     renderer.root.add(grid);
   }
@@ -228,6 +339,8 @@ const program = Effect.gen(function* () {
         debugLine.content = `render error: ${error.reason}`;
       }),
     ),
+    // After painting, detect a pinned process that has exited (Feature 2).
+    Effect.zipRight(checkFocusExit),
     Effect.repeat(Schedule.spaced(Duration.millis(config.refreshMs))),
     Effect.forkScoped,
   );
