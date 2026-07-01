@@ -14,6 +14,7 @@ import {
 import {
   clampScroll,
   displayName,
+  filterProcesses,
   formatHeader,
   formatProcessRow,
   type KillFn,
@@ -22,6 +23,21 @@ import {
   resolveSelectedIndex,
   sortProcesses,
 } from "../src/ui/components/process-table.ts";
+
+const key = (name: string, sequence = name): import("../src/services/input-router.ts").InputKey => ({
+  name,
+  ctrl: false,
+  shift: false,
+  meta: false,
+  option: false,
+  sequence,
+});
+const typeChars = (
+  table: ReturnType<typeof makeProcessTable>,
+  text: string,
+): void => {
+  for (const ch of text) table.onFilterKey(key(ch));
+};
 
 const rec = (
   pid: number,
@@ -67,6 +83,25 @@ describe("sortProcesses", () => {
     expect(sortProcesses(tied, "cpu").map((p) => p.pid as number)).toEqual([
       2, 5, 9,
     ]);
+  });
+});
+
+describe("filterProcesses", () => {
+  test("empty query returns every process unchanged", () => {
+    expect(filterProcesses(three, "")).toEqual(three);
+  });
+
+  test("case-insensitive substring match", () => {
+    expect(filterProcesses(three, "ALPHA").map((p) => p.pid as number)).toEqual([100]);
+  });
+
+  test("matches anywhere in the full command path, not just the basename", () => {
+    const procs = [rec(1, 1, 1, "/usr/local/bin/bun"), rec(2, 1, 1, "/usr/bin/cargo")];
+    expect(filterProcesses(procs, "local").map((p) => p.pid as number)).toEqual([1]);
+  });
+
+  test("no matches yields an empty array", () => {
+    expect(filterProcesses(three, "zzz")).toEqual([]);
   });
 });
 
@@ -307,6 +342,220 @@ describe("ProcessTable (integration)", () => {
     try {
       await renderOnce();
       expect(captureCharFrame()).toContain("waiting for first reading");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("startFilter shows the bar with a cursor before any typing", async () => {
+    const { renderer, renderOnce, captureCharFrame, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      await renderOnce();
+      const frame = captureCharFrame();
+      expect(frame).toContain("Filter:");
+      expect(frame).toContain("3 / 3");
+      expect(frame).toContain("alpha");
+      expect(frame).toContain("bravo");
+      expect(frame).toContain("charlie");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("typing narrows the table live and updates the match count", async () => {
+    const { renderer, renderOnce, captureCharFrame, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      typeChars(table, "bravo");
+      await renderOnce();
+      const frame = captureCharFrame();
+      expect(frame).toContain("Filter: bravo");
+      expect(frame).toContain("1 / 3");
+      expect(frame).toContain("bravo");
+      expect(frame).not.toContain("alpha");
+      expect(frame).not.toContain("charlie");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("backspace edits the query", async () => {
+    const { renderer, renderOnce, captureCharFrame, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      typeChars(table, "bra");
+      table.onFilterKey(key("backspace", "\x7F"));
+      await renderOnce();
+      expect(captureCharFrame()).toContain("Filter: br");
+      expect(captureCharFrame()).not.toContain("Filter: bra ");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("no matches shows a message naming the query", async () => {
+    const { renderer, renderOnce, captureCharFrame, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      typeChars(table, "zzz");
+      await renderOnce();
+      expect(captureCharFrame()).toContain('no matches for "zzz"');
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("lockFilter (Enter) keeps the table filtered and drops the cursor", async () => {
+    const { renderer, renderOnce, captureCharFrame, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      typeChars(table, "bravo");
+      table.lockFilter();
+      await renderOnce();
+      const frame = captureCharFrame();
+      expect(frame).toContain("Filter: bravo");
+      expect(frame).not.toContain("█");
+      expect(frame).toContain("bravo");
+      expect(frame).not.toContain("alpha");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("clearFilter (Escape) restores the full list and hides the bar", async () => {
+    const { renderer, renderOnce, captureCharFrame, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      typeChars(table, "bravo");
+      table.clearFilter();
+      await renderOnce();
+      const frame = captureCharFrame();
+      expect(frame).not.toContain("Filter:");
+      expect(frame).toContain("alpha");
+      expect(frame).toContain("bravo");
+      expect(frame).toContain("charlie");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("a locked filter survives a data refresh — new samples don't reset the query", async () => {
+    const { renderer, renderOnce, captureCharFrame, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      typeChars(table, "bravo");
+      table.lockFilter();
+      await renderOnce();
+
+      const next = [...three, rec(400, 5, 50, "/bin/delta")];
+      table.update(Option.some(okState(next)));
+      await renderOnce();
+      const frame = captureCharFrame();
+      expect(frame).toContain("Filter: bravo");
+      expect(frame).toContain("1 / 4");
+      expect(frame).toContain("bravo");
+      expect(frame).not.toContain("delta");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("filtered selection feeds the pin flow: arrow to the match, it's the one returned", async () => {
+    const { renderer, renderOnce, table } = await setup();
+    try {
+      table.update(Option.some(okState(three)));
+      await renderOnce();
+      table.startFilter();
+      typeChars(table, "a"); // matches alpha, bravo, charlie (all contain "a")
+      table.lockFilter();
+      await renderOnce();
+      table.onKey(key("down"));
+      table.onKey(key("down"));
+      // cpu order among matches: bravo(200), charlie(300), alpha(100)
+      expect(table.getSelection()?.pid as number).toBe(100);
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("end-to-end: / enters Filter mode via the InputRouter; q/k are literal while typing", async () => {
+    const { renderer, mockInput } = await createTestRenderer({ width: 80, height: 24 });
+    const table = makeProcessTable(renderer);
+    renderer.root.add(table.root);
+    try {
+      let modeAfterSlash = "";
+      let modeAfterEnter = "";
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const router = yield* InputRouter;
+            yield* router.register("Normal", (k) =>
+              k.name === "/"
+                ? Effect.sync(() => table.startFilter()).pipe(
+                    Effect.zipRight(router.setMode("Filter")),
+                  )
+                : Effect.sync(() => table.onKey(k)),
+            );
+            yield* router.register("Filter", (k) => {
+              if (k.name === "return") {
+                return Effect.sync(() => table.lockFilter()).pipe(
+                  Effect.zipRight(router.setMode("Normal")),
+                );
+              }
+              if (k.name === "escape") {
+                return Effect.sync(() => table.clearFilter()).pipe(
+                  Effect.zipRight(router.setMode("Normal")),
+                );
+              }
+              return Effect.sync(() => table.onFilterKey(k));
+            });
+
+            table.update(Option.some(okState(three)));
+            yield* Effect.sleep("10 millis");
+            yield* Effect.sync(() => mockInput.pressKey("/"));
+            yield* Effect.sleep("10 millis");
+            modeAfterSlash = yield* router.mode;
+
+            yield* Effect.sync(() => mockInput.typeText("bravo"));
+            yield* Effect.sleep("20 millis");
+            // "q"/"k" are literal in Filter mode: no quit, no kill-confirm opened.
+            yield* Effect.sync(() => mockInput.pressKey("q"));
+            yield* Effect.sync(() => mockInput.pressKey("k"));
+            yield* Effect.sleep("10 millis");
+            expect(table.isAwaitingConfirm()).toBe(false);
+
+            yield* Effect.sync(() => mockInput.pressEnter());
+            yield* Effect.sleep("10 millis");
+            modeAfterEnter = yield* router.mode;
+          }).pipe(
+            Effect.provide(
+              InputRouterLive.pipe(
+                Layer.provide(Layer.succeed(Renderer, renderer)),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(modeAfterSlash).toBe("Filter");
+      expect(modeAfterEnter).toBe("Normal");
+      // The literal "q"/"k" were appended to the query ("bravoqk"), which no
+      // process name matches — proof they were text, not quit/kill keys.
+      expect(table.getSelection()).toBeNull();
     } finally {
       renderer.destroy();
     }

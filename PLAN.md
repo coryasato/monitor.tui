@@ -24,7 +24,7 @@ children are killed on monitor quit by default* (`--no-kill-on-exit` to detach).
 
 ---
 
-## Status — Features 0–2 complete; next up: Feature 3
+## Status — Features 0–3 complete; next up: Feature 4
 
 All shipped with `tsc --noEmit` + `bun test` green and a PTY smoke test
 (boots, renders, clean SIGINT, no orphaned collectors). This section is the
@@ -88,6 +88,12 @@ detection) are summarized under "### 2 — Process Focus View ✅ COMPLETE".**
   its `exports` map blocks deep imports → use the local `InputKey` structural type.
 - Parsed key names: Enter = `"return"`, Esc = `"escape"`, arrows
   `up/down/left/right`; printable text is in `key.sequence` (for Filter mode).
+- Every printable single-char key (letters/digits/symbols) has a
+  **one-character `name`** (`key.name.length === 1 && !ctrl && !meta` = typed
+  text, no denylist needed); named/control keys (`return`, `escape`,
+  `backspace`, `tab`, `space`, arrows, function keys) always have a
+  multi-character `name`. Trap: `backspace`'s *sequence* is also length 1, so
+  check `name === "backspace"` before the generic length-1 branch.
 - Only import from `@opentui/core` and `@opentui/core/testing`.
 - Tests: a table/panel root needs an explicit `height` under `createTestRenderer`
   (no `flexGrow` parent there); drive keys via `mockInput` + parsed `KeyEvent`.
@@ -301,7 +307,51 @@ external kill fires the exit toast). Seams Features 4 & 5 consume:
 
 ---
 
-### 3 — Process Search & Filter
+### 3 — Process Search & Filter ✅ COMPLETE
+
+Shipped green (`tsc --noEmit` + `bun test`, plus a real-pty boot/quit smoke:
+clean render, no stderr, no orphaned collectors). Purely a `ProcessTable` +
+`InputRouter` consumer — no new service, collector, or store tag. Seams later
+features consume:
+
+- **Filter state lives in `ProcessTable`** (`ui/components/process-table.ts`):
+  `filterMode` (editing, cursor shown) + `filterQuery` (persists once locked)
+  are private closure state, not exposed as store/service state. New table
+  methods: `startFilter()`, `onFilterKey(key)` (text edit only), `lockFilter()`
+  (Enter), `clearFilter()` (Escape). `sorted()` now runs `filterProcesses` (pure,
+  case-insensitive substring against the **full name/command**, not just the
+  display basename — exported for unit testing) before `sortProcesses`, so
+  selection/sort/scroll/kill/pin all transparently operate on the filtered set
+  with no changes to that logic.
+- **Mode transitions live in `main.ts`**, mirroring Feature 2's pin/unpin
+  split: the table owns text-edit state, `main.ts` owns `router.setMode`. `/`
+  in `Normal` (guarded by `table.isAwaitingConfirm()`, like `Enter`) calls
+  `table.startFilter()` then `setMode("Filter")`; the `Filter`-mode handler
+  routes `return`→`lockFilter`+`setMode("Normal")`, `escape`→`clearFilter`+
+  `setMode("Normal")`, everything else→`onFilterKey`.
+- **Key-parsing gotcha (new, worth saving):** OpenTUI's parser gives every
+  printable single-char key (letters, digits, symbols) a **one-character
+  `name`** (uppercase letters are lowercased in `name`, with `shift: true`) —
+  named/control keys (`return`, `escape`, `backspace`, `tab`, `space`, arrows,
+  function keys, ...) always have a **multi-character `name`**. So
+  `key.name.length === 1 && !key.ctrl && !key.meta` cleanly selects "this is
+  typed text" with no denylist — but a same-length-1 trap exists: `backspace`'s
+  *sequence* (`\x7F`/`\b`) is also length 1, so it must be checked by `name`
+  **before** the generic branch, not folded into it. Use `key.sequence` (not
+  `key.name`) to append the character so typed case is preserved.
+- **UI:** a `Filter:` bar (new `TextRenderable`, first child of `root` so it
+  sits above the header) is visible whenever `filterMode || filterQuery.length
+  > 0` — shows a `█` cursor only while `filterMode` is true, and always shows
+  the live match count `N / total`. Locking (Enter) keeps the bar (query
+  retained, cursor gone); clearing (Escape) hides it and restores the full
+  list. Zero matches replaces the row-pool placeholder with `no matches for
+  "<query>"` instead of the generic `no processes` message.
+- **Mode-aware quit already covered this for free:** `isQuitForMode` (Feature
+  0) already treats bare `q`/`k` as literal outside `Normal`/`Focus`, so typing
+  "quick" into the filter query doesn't quit or open a kill confirm — no new
+  logic needed, just a regression test proving it.
+
+**Original spec (for reference):**
 
 **Goal:** type to filter the process table by name so the user can find a specific process fast without scrolling 200 rows.
 

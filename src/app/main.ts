@@ -249,21 +249,47 @@ const program = Effect.gen(function* () {
         renderer.requestRender();
       });
 
-    // Normal mode: `Enter` pins the highlighted row (unless a kill confirm is
-    // open); every other key drives the table.
-    yield* router.register("Normal", (key) =>
-      key.name === "return"
-        ? Effect.suspend(() => {
-            if (table.isAwaitingConfirm()) return Effect.void;
-            const sel = table.getSelection();
-            return sel === null ? Effect.void : pin(sel);
-          })
-        : Effect.sync(() => table.onKey(key)),
-    );
+    // Normal mode: `Enter` pins the highlighted row, `/` enters Filter mode
+    // (Feature 3) — both suppressed while a kill confirm is open; every other
+    // key drives the table.
+    yield* router.register("Normal", (key) => {
+      if (key.name === "return") {
+        return Effect.suspend(() => {
+          if (table.isAwaitingConfirm()) return Effect.void;
+          const sel = table.getSelection();
+          return sel === null ? Effect.void : pin(sel);
+        });
+      }
+      if (key.name === "/") {
+        return Effect.suspend(() => {
+          if (table.isAwaitingConfirm()) return Effect.void;
+          table.startFilter();
+          return router.setMode("Filter");
+        });
+      }
+      return Effect.sync(() => table.onKey(key));
+    });
     // Focus mode: `Escape` unpins; quit keys are handled by the router itself.
     yield* router.register("Focus", (key) =>
       key.name === "escape" ? unpin : Effect.void,
     );
+    // Filter mode (Feature 3): `Enter` locks the query and returns to Normal
+    // (table stays filtered, `/` re-edits); `Escape` clears the query and
+    // returns to Normal; every other key edits the query text. `q`/`k` are
+    // literal here — only Ctrl+C quits (InputRouter's mode-aware quit rule).
+    yield* router.register("Filter", (key) => {
+      if (key.name === "return") {
+        return Effect.sync(() => table.lockFilter()).pipe(
+          Effect.zipRight(router.setMode("Normal")),
+        );
+      }
+      if (key.name === "escape") {
+        return Effect.sync(() => table.clearFilter()).pipe(
+          Effect.zipRight(router.setMode("Normal")),
+        );
+      }
+      return Effect.sync(() => table.onFilterKey(key));
+    });
 
     // Exit detection (attached PID): when the pinned process disappears from the
     // process list, auto-unpin and toast. Runs once per render tick (≤ one poll

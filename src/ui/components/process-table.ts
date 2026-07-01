@@ -52,10 +52,33 @@ export interface ProcessTable {
   readonly isAwaitingConfirm: () => boolean;
   /** Show a transient toast in the footer (e.g. Feature 2's "PID exited" notice). */
   readonly notify: (message: string) => void;
+  /** Enter Filter mode (the `/` handler in Normal mode calls this, then sets the InputRouter's mode). */
+  readonly startFilter: () => void;
+  /** Feed a parsed key from the InputRouter's `Filter`-mode handler (text edit only — Enter/Escape are mode transitions the caller handles). */
+  readonly onFilterKey: (key: InputKey) => void;
+  /** `Enter` in Filter mode: stop editing, keep the query applied (`/` re-enters to edit). */
+  readonly lockFilter: () => void;
+  /** `Escape` in Filter mode: clear the query and stop editing. */
+  readonly clearFilter: () => void;
 }
 
 const clamp = (n: number, lo: number, hi: number): number =>
   Math.max(lo, Math.min(hi, n));
+
+/**
+ * Pure: case-insensitive substring match against the full process name/command
+ * (not just the display basename — `Full command names ... feed Feature 3's
+ * search`), so `bun` also matches a path like `/usr/local/bin/bun`. An empty
+ * query is a no-op. Exported for unit testing.
+ */
+export function filterProcesses(
+  procs: ReadonlyArray<ProcessRecord>,
+  query: string,
+): ProcessRecord[] {
+  if (query.length === 0) return [...procs];
+  const q = query.toLowerCase();
+  return procs.filter((p) => p.name.toLowerCase().includes(q));
+}
 
 /**
  * Pure: sort a copy of the process list by the active column, descending, with a
@@ -158,10 +181,11 @@ export function formatHeader(bodyWidth: number, sortKey: SortKey): string {
   return `${pid} ${name} ${cpu} ${mem}`;
 }
 
-const HINT = "↑↓ move · c/m sort · k kill";
+const HINT = "↑↓ move · c/m sort · k kill · / filter";
 const SELECTED_BG = "#44475A";
 const SELECTED_FG = "#F8F8F2";
 const ROW_FG = "#BFBFBF";
+const FILTER_FG = "#F1FA8C";
 
 const TOAST_MS = 4000;
 
@@ -184,8 +208,19 @@ export function makeProcessTable(
   let pendingKill: ProcessRecord | null = null;
   let toast: string | null = null;
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  // Filter mode is editing (cursor shown); the query itself persists once locked
+  // (Enter → filterMode false, query retained) so the table stays filtered until
+  // `/` re-enters edit or Escape clears it.
+  let filterMode = false;
+  let filterQuery = "";
 
   // --- Renderables ----------------------------------------------------------
+  const filterBar = new TextRenderable(renderer, {
+    id: "proc-filter",
+    content: "",
+    fg: FILTER_FG,
+    visible: false,
+  });
   const header = new TextRenderable(renderer, {
     id: "proc-header",
     content: "",
@@ -209,6 +244,7 @@ export function makeProcessTable(
     flexDirection: "column",
     title: "Processes",
   });
+  root.add(filterBar);
   root.add(header);
   root.add(body);
   root.add(footer);
@@ -228,12 +264,20 @@ export function makeProcessTable(
     }
   };
 
-  /** Current sorted process list from the cached snapshot (empty if unavailable). */
+  /** All processes in the cached snapshot, unfiltered (for the match-count denominator). */
+  const totalProcessCount = (): number => {
+    if (Option.isNone(cached)) return 0;
+    const s = cached.value;
+    if (s._tag !== "ok" || s.snapshot._tag !== "process") return 0;
+    return s.snapshot.processes.length;
+  };
+
+  /** Current filtered + sorted process list from the cached snapshot (empty if unavailable). */
   const sorted = (): ProcessRecord[] => {
     if (Option.isNone(cached)) return [];
     const s = cached.value;
     if (s._tag !== "ok" || s.snapshot._tag !== "process") return [];
-    return sortProcesses(s.snapshot.processes, sortKey);
+    return sortProcesses(filterProcesses(s.snapshot.processes, filterQuery), sortKey);
   };
 
   /** A short status line for the cached state when there are no rows to show. */
@@ -275,6 +319,15 @@ export function makeProcessTable(
     header.content = formatHeader(width, sortKey);
 
     const rows = sorted();
+
+    // The bar stays visible while editing (cursor shown) or once a query is
+    // locked in (query retained, table stays filtered until `/` or Escape).
+    const showFilterBar = filterMode || filterQuery.length > 0;
+    filterBar.visible = showFilterBar;
+    filterBar.content = showFilterBar
+      ? `Filter: ${filterQuery}${filterMode ? "█" : ""}   ${rows.length} / ${totalProcessCount()}`
+      : "";
+
     footer.content =
       pendingKill !== null
         ? `Kill PID ${pendingKill.pid as number} ${displayName(pendingKill.name)}?  (y/n)`
@@ -285,7 +338,9 @@ export function makeProcessTable(
     const empty = emptyMessage();
     if (empty !== null || rows.length === 0) {
       ensureRows(1);
-      rowPool[0]!.content = empty?.text ?? "no processes";
+      rowPool[0]!.content =
+        empty?.text ??
+        (filterQuery.length > 0 ? `no matches for "${filterQuery}"` : "no processes");
       rowPool[0]!.fg = empty?.fg ?? "#888888";
       rowPool[0]!.bg = undefined;
       rowPool[0]!.visible = true;
@@ -372,6 +427,44 @@ export function makeProcessTable(
     draw(true);
   };
 
+  // --- Filter mutators (Filter-mode input path) ------------------------------
+  const startFilter = (): void => {
+    filterMode = true;
+    draw(true);
+  };
+
+  const onFilterKey = (key: InputKey): void => {
+    if (key.name === "backspace") {
+      if (filterQuery.length > 0) filterQuery = filterQuery.slice(0, -1);
+      draw(true);
+      return;
+    }
+    if (key.name === "space") {
+      filterQuery += " ";
+      draw(true);
+      return;
+    }
+    // Printable single-char keys (letters/digits/symbols) have a one-character
+    // `name` (see the OpenTUI key-parsing gotcha); named/control keys (arrows,
+    // return, escape, function keys, ...) don't, so this excludes them without an
+    // explicit denylist. `sequence` (not `name`) preserves the typed case.
+    if (key.name.length === 1 && !key.ctrl && !key.meta) {
+      filterQuery += key.sequence;
+      draw(true);
+    }
+  };
+
+  const lockFilter = (): void => {
+    filterMode = false;
+    draw(true);
+  };
+
+  const clearFilter = (): void => {
+    filterMode = false;
+    filterQuery = "";
+    draw(true);
+  };
+
   const getSelection = (): ProcessRecord | null => {
     const rows = sorted();
     if (rows.length === 0) return null;
@@ -437,5 +530,9 @@ export function makeProcessTable(
     getSortKey: () => sortKey,
     isAwaitingConfirm: () => pendingKill !== null,
     notify,
+    startFilter,
+    onFilterKey,
+    lockFilter,
+    clearFilter,
   };
 }
