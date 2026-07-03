@@ -11,10 +11,12 @@ import type {
 } from "../types/metrics.ts";
 import { collectorStream } from "./collector-stream.ts";
 import {
+  aggregateSubtree,
   assembleRecords,
   clampPercent,
   memPercentOf,
   type RawProcess,
+  type SubtreeProc,
   toFocusSnapshot,
   toSnapshot,
 } from "./process-common.ts";
@@ -35,6 +37,7 @@ const COLLECTOR = "process";
 const NFIELDS = 7;
 /** Field offsets within each NFIELDS-wide record. */
 const F_PID = 0;
+const F_PPID = 1;
 const F_CPU_NS = 2;
 const F_RSS = 3;
 const F_THREADS = 4;
@@ -299,6 +302,7 @@ const readFocus = (
         threadCount: second.threads,
         openFds: null, // see TODO(macos-fds) above
         status: second.status,
+        descendantCount: null, // single attached PID, not a subtree
       },
       FOCUS_COLLECTOR,
     );
@@ -307,8 +311,98 @@ const readFocus = (
 const focusStream = (pid: ProcessId): Stream.Stream<MetricState> =>
   collectorStream(FOCUS_COLLECTOR, readFocus(pid as number), POLL_GAP);
 
+// --- Subtree focus (launched command, Feature 4) ---------------------------
+//
+// A launched command's resource view sums the child + all descendants. We reuse
+// the same `read_processes` module — it already emits ppid (field 1) and threads
+// (field 4) — and walk the tree with the shared pure `aggregateSubtree` helper.
+
+/** One full sample carrying the ppid/thread fields the subtree walk needs. */
+interface SubtreeSample {
+  readonly procs: SubtreeProc[];
+  readonly atNs: number;
+}
+
+/** Read one `read_processes` snapshot, decoding every field the subtree walk uses. */
+const sampleSubtreeRaw = (): SubtreeSample | null => {
+  const b = load();
+  const count = b.read(b.numBuf, MAX_PROCS, b.nameBuf, NAMES_CAP, b.usedBuf);
+  const atNs = Number(Bun.nanoseconds());
+  if (count < 0) return null;
+
+  const procs: SubtreeProc[] = [];
+  let nameOff = 0;
+  for (let i = 0; i < count; i++) {
+    const base = i * NFIELDS;
+    const nameLen = Number(b.numBuf[base + F_NAME_LEN]!);
+    const name =
+      nameLen > 0
+        ? decoder.decode(b.nameBuf.subarray(nameOff, nameOff + nameLen))
+        : "";
+    nameOff += nameLen;
+    procs.push({
+      pid: Number(b.numBuf[base + F_PID]!),
+      ppid: Number(b.numBuf[base + F_PPID]!),
+      cpuCumulative: Number(b.numBuf[base + F_CPU_NS]!),
+      memBytes: Number(b.numBuf[base + F_RSS]!),
+      threads: Number(b.numBuf[base + F_THREADS]!),
+      status: macStatus(Number(b.numBuf[base + F_STATUS]!)),
+      name,
+    });
+  }
+  return { procs, atNs };
+};
+
+const sampleSubtree: Effect.Effect<SubtreeSample, CollectorError> = Effect.try({
+  try: () => {
+    const s = sampleSubtreeRaw();
+    if (s === null) throw new Error("proc_listpids returned no PIDs");
+    return s;
+  },
+  catch: (cause) =>
+    new CollectorError({
+      collector: FOCUS_COLLECTOR,
+      reason: "libproc read_processes failed",
+      cause,
+    }),
+});
+
+/** One subtree reading for `rootPid`: sample, wait, sample again, sum + diff the subtree. */
+const readSubtree = (
+  rootPid: number,
+): Effect.Effect<ProcessFocusSnapshot, CollectorError> =>
+  Effect.gen(function* () {
+    const first = yield* sampleSubtree;
+    yield* Effect.sleep(SAMPLE_INTERVAL);
+    const second = yield* sampleSubtree;
+
+    const denom = (second.atNs - first.atNs) * CORE_COUNT;
+    const prevCpu = new Map(first.procs.map((p) => [p.pid, p.cpuCumulative]));
+    const agg = aggregateSubtree(prevCpu, second.procs, rootPid);
+    const cpuPercent =
+      denom <= 0 ? 0 : clampPercent((agg.cpuDelta / denom) * 100);
+
+    return yield* toFocusSnapshot(
+      {
+        pid: rootPid,
+        name: agg.rootName,
+        cpuPercent,
+        memBytes: agg.memBytes,
+        memPercent: memPercentOf(agg.memBytes),
+        threadCount: agg.threads,
+        openFds: null, // see TODO(macos-fds) above
+        status: agg.rootStatus,
+        descendantCount: agg.descendantCount,
+      },
+      FOCUS_COLLECTOR,
+    );
+  });
+
+const subtreeFocusStream = (pid: ProcessId): Stream.Stream<MetricState> =>
+  collectorStream(FOCUS_COLLECTOR, readSubtree(pid as number), POLL_GAP);
+
 /** Live macOS implementation of {@link ProcessCollector}. */
 export const ProcessCollectorMacOSLive = Layer.succeed(
   ProcessCollector,
-  ProcessCollector.of({ read, stream, focusStream }),
+  ProcessCollector.of({ read, stream, focusStream, subtreeFocusStream }),
 );

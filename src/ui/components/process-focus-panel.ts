@@ -62,6 +62,9 @@ export function makeProcessFocusPanel(
   // --- UI state -------------------------------------------------------------
   let pinnedPid: ProcessId | null = null;
   let pinnedName = "";
+  // null = single attached PID; a number = launched-command subtree (Feature 4),
+  // shown as `(+N descendants)` in the header.
+  let descendantCount: number | null = null;
   let cpuHistory: Array<number | null> = [];
   let memHistory: Array<number | null> = [];
   let cached: Option.Option<MetricState> = Option.none();
@@ -131,7 +134,12 @@ export function makeProcessFocusPanel(
 
   const drawHeader = (): void => {
     const pid = pinnedPid === null ? "—" : String(pinnedPid as number);
-    header.content = fit(`PID ${pid} — ${pinnedName}`, innerWidth());
+    // A launched command aggregates its subtree — note the descendant count.
+    const suffix =
+      descendantCount !== null && descendantCount > 0
+        ? ` (+${descendantCount} descendant${descendantCount === 1 ? "" : "s"})`
+        : "";
+    header.content = fit(`PID ${pid} — ${pinnedName}${suffix}`, innerWidth());
   };
 
   /** Rebuild all renderable content from current state. */
@@ -157,8 +165,12 @@ export function makeProcessFocusPanel(
       return;
     }
 
-    // Refresh the header name from the authoritative snapshot.
-    pinnedName = focus.name;
+    // For a single attached PID, refresh the header name from the authoritative
+    // snapshot (the resolved exe path). For a launched-command subtree we keep the
+    // primed command string (e.g. `bun run build`, not the resolved `bun` path).
+    if (focus.descendantCount === null && focus.name.length > 0) {
+      pinnedName = focus.name;
+    }
     drawHeader();
 
     cpuTitle.content = `CPU  ${(focus.cpuPercent as number).toFixed(1)}%`;
@@ -171,6 +183,7 @@ export function makeProcessFocusPanel(
   const prime = (pid: ProcessId, name: string): void => {
     pinnedPid = pid;
     pinnedName = name;
+    descendantCount = null;
     cpuHistory = [];
     memHistory = [];
     cached = Option.none();
@@ -180,6 +193,7 @@ export function makeProcessFocusPanel(
   const update = (state: Option.Option<MetricState>): void => {
     cached = state;
     const focus = focusOf();
+    if (focus !== null) descendantCount = focus.descendantCount;
     // A gap (null) for a missing/unavailable sample, mirroring the CPU sparkline.
     cpuHistory = appendCapped(
       cpuHistory,

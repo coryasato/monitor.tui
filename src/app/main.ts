@@ -21,6 +21,7 @@ import { CpuCoresCollector } from "../services/cpu-cores-collector.ts";
 import { CpuCollector } from "../services/cpu-collector.ts";
 import { DiskCollector } from "../services/disk-collector.ts";
 import { InputRouter, InputRouterLive } from "../services/input-router.ts";
+import { launchProcess } from "../services/launched-process.ts";
 import { MemoryCollector } from "../services/memory-collector.ts";
 import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
 import { NetworkCollector } from "../services/network-collector.ts";
@@ -209,6 +210,10 @@ const program = Effect.gen(function* () {
     // The collector is forked into a single closeable scope opened here and
     // closed on program teardown, so a clean quit always interrupts it.
     const pinnedRef = yield* Ref.make<Option.Option<ProcessId>>(Option.none());
+    // The PID of a launched child (Feature 4), if any. Its exit is detected
+    // precisely via the subprocess handle, so the ps-absence check below skips it.
+    const launchedPidRef =
+      yield* Ref.make<Option.Option<ProcessId>>(Option.none());
     const focusFiberRef =
       yield* Ref.make<Option.Option<Fiber.RuntimeFiber<void>>>(Option.none());
     const focusScope = yield* Scope.make();
@@ -229,12 +234,19 @@ const program = Effect.gen(function* () {
       renderer.requestRender();
     });
 
-    const pin = (sel: ProcessRecord): Effect.Effect<void> =>
+    // Pin `pid` to the focus view, driving the panel from `stream` (a per-PID
+    // focus stream for an attached process, or a subtree stream for a launched
+    // command). Forks the stream into `focusScope` so unpin/quit interrupts it.
+    const pinStream = (
+      pid: ProcessId,
+      name: string,
+      stream: Stream.Stream<MetricState>,
+    ): Effect.Effect<void> =>
       Effect.gen(function* () {
         yield* stopFocus; // replace any prior pin
-        focusPanel.prime(sel.pid, sel.name);
-        yield* Ref.set(pinnedRef, Option.some(sel.pid));
-        const fiber = yield* processes.focusStream(sel.pid).pipe(
+        focusPanel.prime(pid, name);
+        yield* Ref.set(pinnedRef, Option.some(pid));
+        const fiber = yield* stream.pipe(
           Stream.runForEach((state) =>
             Effect.sync(() => {
               focusPanel.update(Option.some(state));
@@ -248,6 +260,9 @@ const program = Effect.gen(function* () {
         yield* router.setMode("Focus");
         renderer.requestRender();
       });
+
+    const pin = (sel: ProcessRecord): Effect.Effect<void> =>
+      pinStream(sel.pid, sel.name, processes.focusStream(sel.pid));
 
     // Normal mode: `Enter` pins the highlighted row, `/` enters Filter mode
     // (Feature 3) — both suppressed while a kill confirm is open; every other
@@ -298,6 +313,10 @@ const program = Effect.gen(function* () {
     checkFocusExit = Effect.gen(function* () {
       const pinned = yield* Ref.get(pinnedRef);
       if (Option.isNone(pinned)) return;
+      // A launched child's exit is handled precisely by its `child.exited`
+      // watcher (with the real exit code), so don't also detect it by ps-absence.
+      const launched = yield* Ref.get(launchedPidRef);
+      if (Option.isSome(launched) && launched.value === pinned.value) return;
       const state = yield* store.get("process");
       if (Option.isNone(state)) return;
       const s = state.value;
@@ -308,6 +327,55 @@ const program = Effect.gen(function* () {
         yield* unpin;
       }
     });
+
+    // --- Launched command (Feature 4) ----------------------------------------
+    // `monitor -- <command…>`: spawn the command as our child (a scope-bound
+    // resource — killed with its subtree on quit unless `--no-kill-on-exit`),
+    // auto-pin its aggregated subtree in the focus view, and watch its precise
+    // exit via the subprocess handle. A failed launch is a toast, not a crash.
+    if (config.launch !== null) {
+      const launch = config.launch;
+      yield* launchProcess(launch.command, {
+        killOnExit: launch.killOnExit,
+        stderrLines: launch.stderrLines,
+      }).pipe(
+        Effect.flatMap((handle) =>
+          Effect.gen(function* () {
+            yield* Ref.set(launchedPidRef, Option.some(handle.pid));
+            yield* pinStream(
+              handle.pid,
+              handle.command,
+              processes.subtreeFocusStream(handle.pid),
+            );
+            // Precise exit: toast the real code/signal, auto-unpin if it's still
+            // the pinned process. Forked so it never blocks startup.
+            yield* handle.awaitExit.pipe(
+              Effect.flatMap((info) =>
+                Effect.gen(function* () {
+                  const detail =
+                    info.exitCode !== null
+                      ? `code ${info.exitCode}`
+                      : info.signalCode !== null
+                        ? `signal ${info.signalCode}`
+                        : "unknown";
+                  table.notify(
+                    `PID ${handle.pid as number} exited (${detail})`,
+                  );
+                  const pinned = yield* Ref.get(pinnedRef);
+                  if (Option.isSome(pinned) && pinned.value === handle.pid) {
+                    yield* unpin;
+                  }
+                }),
+              ),
+              Effect.forkIn(focusScope),
+            );
+          }),
+        ),
+        Effect.catchTag("CollectorError", (error) =>
+          Effect.sync(() => table.notify(error.reason)),
+        ),
+      );
+    }
   } else {
     renderer.root.add(grid);
   }

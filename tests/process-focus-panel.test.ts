@@ -26,6 +26,7 @@ const focusState = (
     threadCount: 8,
     openFds: 42,
     status: "running" as ProcessStatus,
+    descendantCount: null,
     ...overrides,
   };
   return { _tag: "ok", tag: "process-focus", at: snapshot.at, snapshot };
@@ -123,6 +124,39 @@ describe("ProcessFocusPanel", () => {
       const frame = captureCharFrame();
       expect(frame).toContain("PID 2");
       expect(frame).toContain("waiting for first reading");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("notes the descendant count for a launched-command subtree", async () => {
+    const { renderer, renderOnce, captureCharFrame, panel } = await setup();
+    try {
+      panel.prime(ProcessId(1234), "bun run build");
+      panel.update(
+        Option.some(
+          focusState({ name: "/path/to/bun", descendantCount: 3 }),
+        ),
+      );
+      await renderOnce();
+      const frame = captureCharFrame();
+      // Keeps the primed command string (not the resolved exe path) and appends
+      // the descendant note.
+      expect(frame).toContain("bun run build");
+      expect(frame).not.toContain("/path/to/bun");
+      expect(frame).toContain("+3 descendants");
+    } finally {
+      renderer.destroy();
+    }
+  });
+
+  test("a single-descendant subtree reads '+1 descendant' (singular)", async () => {
+    const { renderer, renderOnce, captureCharFrame, panel } = await setup();
+    try {
+      panel.prime(ProcessId(10), "sh -c work");
+      panel.update(Option.some(focusState({ descendantCount: 1 })));
+      await renderOnce();
+      expect(captureCharFrame()).toContain("+1 descendant");
     } finally {
       renderer.destroy();
     }

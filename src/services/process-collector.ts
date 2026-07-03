@@ -33,5 +33,15 @@ export class ProcessCollector extends Context.Tag("ProcessCollector")<
      * and closed on unpin, so no focus collection runs while nothing is pinned.
      */
     readonly focusStream: (pid: ProcessId) => Stream.Stream<MetricState>;
+    /**
+     * Like {@link focusStream}, but each sample **aggregates the whole process
+     * subtree** rooted at `pid` — the process plus every descendant, summed
+     * (CPU%, resident memory, threads), with `descendantCount` set on the
+     * snapshot. This is the focus stream for a launched command (Feature 4),
+     * whose real work runs in grandchildren (`bun run …`, `sh -c …`). Same
+     * lifetime contract as {@link focusStream}: forked into a scope opened on
+     * launch and closed on exit/unpin.
+     */
+    readonly subtreeFocusStream: (pid: ProcessId) => Stream.Stream<MetricState>;
   }
 >() {}

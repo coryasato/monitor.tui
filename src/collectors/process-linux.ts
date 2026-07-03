@@ -11,10 +11,12 @@ import type {
 } from "../types/metrics.ts";
 import { collectorStream } from "./collector-stream.ts";
 import {
+  aggregateSubtree,
   assembleRecords,
   clampPercent,
   memPercentOf,
   type RawProcess,
+  type SubtreeProc,
   toFocusSnapshot,
   toSnapshot,
 } from "./process-common.ts";
@@ -280,6 +282,7 @@ const readFocus = (
         threadCount: second.stat.threads,
         openFds: second.openFds,
         status: linuxStatus(second.stat.state),
+        descendantCount: null, // single attached PID, not a subtree
       },
       FOCUS_COLLECTOR,
     );
@@ -288,8 +291,98 @@ const readFocus = (
 const focusStream = (pid: ProcessId): Stream.Stream<MetricState> =>
   collectorStream(FOCUS_COLLECTOR, readFocus(pid as number), POLL_GAP);
 
+// --- Subtree focus (launched command, Feature 4) ---------------------------
+//
+// A launched command's resource view sums the child + all descendants. We scan
+// the full `/proc` table (with ppid + threads from each stat line) and walk the
+// tree with the shared pure `aggregateSubtree` helper.
+
+/** One full `/proc` sample carrying the ppid/thread fields the subtree walk needs. */
+interface SubtreeSample {
+  readonly procs: SubtreeProc[];
+  readonly totalJiffies: number;
+}
+
+/** Read + parse one process into a {@link SubtreeProc}; `null` if it vanished mid-scan. */
+const readOneSubtree = async (pid: number): Promise<SubtreeProc | null> => {
+  let stat: ProcPidStat | null;
+  try {
+    stat = parseProcPidStat(await Bun.file(`/proc/${pid}/stat`).text());
+  } catch {
+    return null;
+  }
+  if (stat === null) return null;
+  const cmdline = await readCmdline(pid);
+  return {
+    pid: stat.pid,
+    ppid: stat.ppid,
+    cpuCumulative: stat.cpuJiffies,
+    memBytes: stat.rssPages * PAGE_SIZE,
+    threads: stat.threads,
+    status: linuxStatus(stat.state),
+    name: cmdline ?? stat.comm,
+  };
+};
+
+const sampleSubtree: Effect.Effect<SubtreeSample, CollectorError> =
+  Effect.tryPromise({
+    try: async (): Promise<SubtreeSample> => {
+      const totalJiffies = parseTotalJiffies(
+        await Bun.file("/proc/stat").text(),
+      );
+      if (totalJiffies === null) {
+        throw new Error("could not parse /proc/stat cpu line");
+      }
+      const entries = await readdir("/proc");
+      const pids = entries.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+      const results = await Promise.all(pids.map(readOneSubtree));
+      const procs = results.filter((p): p is SubtreeProc => p !== null);
+      return { procs, totalJiffies };
+    },
+    catch: (cause) =>
+      new CollectorError({
+        collector: FOCUS_COLLECTOR,
+        reason: "failed to read /proc process table",
+        cause,
+      }),
+  });
+
+/** One subtree reading for `rootPid`: sample, wait, sample again, sum + diff the subtree. */
+const readSubtree = (
+  rootPid: number,
+): Effect.Effect<ProcessFocusSnapshot, CollectorError> =>
+  Effect.gen(function* () {
+    const first = yield* sampleSubtree;
+    yield* Effect.sleep(SAMPLE_INTERVAL);
+    const second = yield* sampleSubtree;
+
+    const totalDelta = second.totalJiffies - first.totalJiffies;
+    const prevCpu = new Map(first.procs.map((p) => [p.pid, p.cpuCumulative]));
+    const agg = aggregateSubtree(prevCpu, second.procs, rootPid);
+    const cpuPercent =
+      totalDelta <= 0 ? 0 : clampPercent((agg.cpuDelta / totalDelta) * 100);
+
+    return yield* toFocusSnapshot(
+      {
+        pid: rootPid,
+        name: agg.rootName,
+        cpuPercent,
+        memBytes: agg.memBytes,
+        memPercent: memPercentOf(agg.memBytes),
+        threadCount: agg.threads,
+        openFds: null, // subtree FD aggregation is out of scope for the MVP
+        status: agg.rootStatus,
+        descendantCount: agg.descendantCount,
+      },
+      FOCUS_COLLECTOR,
+    );
+  });
+
+const subtreeFocusStream = (pid: ProcessId): Stream.Stream<MetricState> =>
+  collectorStream(FOCUS_COLLECTOR, readSubtree(pid as number), POLL_GAP);
+
 /** Live Linux implementation of {@link ProcessCollector}. */
 export const ProcessCollectorLinuxLive = Layer.succeed(
   ProcessCollector,
-  ProcessCollector.of({ read, stream, focusStream }),
+  ProcessCollector.of({ read, stream, focusStream, subtreeFocusStream }),
 );

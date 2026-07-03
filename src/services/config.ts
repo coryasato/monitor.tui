@@ -14,6 +14,9 @@ export class Config extends Context.Tag("Config")<Config, AppConfig>() {}
 /** Default config file path (relative to cwd), used when `--config` is absent. */
 export const DEFAULT_CONFIG_PATH = "monitor.config.json";
 
+/** Default cap on the launched process's captured stderr ring buffer (lines). */
+export const DEFAULT_STDERR_LINES = 200;
+
 // --- CLI parsing -----------------------------------------------------------
 
 export interface CliOverrides {
@@ -26,12 +29,24 @@ export interface CliOverrides {
   disk?: { enabled?: boolean };
   process?: { enabled?: boolean };
   sparklineWidth?: number;
+  /** The command after `--` (everything following it, verbatim). Empty = `--` with no command. */
+  launchCommand?: ReadonlyArray<string>;
+  /** `--no-kill-on-exit` sets `false`; unset means "use file/default". */
+  killOnExit?: boolean;
 }
 
 /**
  * Parse CLI args into overrides. Numeric flags are coerced with `Number` (a bad
  * value becomes `NaN` and is rejected later by the schema). Unrecognized args are
  * returned in `unknown` so the loader can fail with a clear `ConfigError`.
+ *
+ * The command to run under the monitor (`monitor -- <command…>`) is everything
+ * after a `--`, OR everything from the first bare positional token (one not
+ * starting with `-`) onward. Supporting the bare form matters because Bun strips
+ * a leading `--` before the script sees it (`bun main.ts -- sleep 2` arrives as
+ * `["sleep","2"]`), and it also lets `monitor sleep 2` work without the `--`. The
+ * command's own flags are never mistaken for the monitor's — collection stops
+ * flag parsing entirely. Unknown `-`/`--`-prefixed tokens still error.
  */
 export const parseArgs = (
   argv: ReadonlyArray<string>,
@@ -40,6 +55,16 @@ export const parseArgs = (
   const unknown: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
+    if (arg === "--") {
+      // Everything after `--` is the launched command + its args, verbatim.
+      overrides.launchCommand = argv.slice(i + 1);
+      break;
+    }
+    if (!arg.startsWith("-")) {
+      // A bare positional starts the command (Bun ate our `--`, or none given).
+      overrides.launchCommand = argv.slice(i);
+      break;
+    }
     switch (arg) {
       case "--config":
         overrides.configPath = argv[++i];
@@ -86,6 +111,12 @@ export const parseArgs = (
       case "--no-process":
         overrides.process = { enabled: false };
         break;
+      case "--kill-on-exit":
+        overrides.killOnExit = true;
+        break;
+      case "--no-kill-on-exit":
+        overrides.killOnExit = false;
+        break;
       default:
         unknown.push(arg);
     }
@@ -105,6 +136,14 @@ const FileConfigSchema = v.object({
   disk: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   process: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   sparkline: v.optional(v.object({ width: v.optional(v.number()) })),
+  // The command itself only comes from the CLI (after `--`); the file may set the
+  // launch *defaults* (kill behavior + stderr buffer size) for when one is given.
+  launch: v.optional(
+    v.object({
+      killOnExit: v.optional(v.boolean()),
+      stderrLines: v.optional(v.number()),
+    }),
+  ),
 });
 type FileConfig = v.InferOutput<typeof FileConfigSchema>;
 
@@ -120,6 +159,18 @@ const AppConfigSchema = v.object({
   sparkline: v.object({
     width: v.pipe(v.number(), v.integer(), v.minValue(4), v.maxValue(200)),
   }),
+  launch: v.nullable(
+    v.object({
+      command: v.pipe(v.array(v.string()), v.minLength(1)),
+      killOnExit: v.boolean(),
+      stderrLines: v.pipe(
+        v.number(),
+        v.integer(),
+        v.minValue(1),
+        v.maxValue(100_000),
+      ),
+    }),
+  ),
 });
 
 // --- Merge -----------------------------------------------------------------
@@ -153,6 +204,16 @@ export const mergeConfig = (
   sparkline: {
     width: cli.sparklineWidth ?? file.sparkline?.width ?? base.sparkline.width,
   },
+  // A launch config exists only when a command was given after `--`; its kill
+  // behavior and buffer size fall back through cli < file < defaults.
+  launch:
+    cli.launchCommand === undefined
+      ? base.launch
+      : {
+          command: cli.launchCommand,
+          killOnExit: cli.killOnExit ?? file.launch?.killOnExit ?? true,
+          stderrLines: file.launch?.stderrLines ?? DEFAULT_STDERR_LINES,
+        },
 });
 
 // --- Loader ----------------------------------------------------------------
@@ -210,6 +271,13 @@ export const loadConfigFrom = (
         reason: `unknown CLI argument(s): ${unknown.join(", ")}`,
       });
     }
+    // `--` with nothing after it is a usage error, caught here for a clear message
+    // (the schema's minLength would otherwise report an opaque validation failure).
+    if (overrides.launchCommand !== undefined && overrides.launchCommand.length === 0) {
+      return yield* new ConfigError({
+        reason: "no command given after `--` (usage: monitor -- <command…>)",
+      });
+    }
     const fileConfig = yield* loadFile(overrides.configPath);
     const merged = mergeConfig(defaultConfig, fileConfig, overrides);
     const result = v.safeParse(AppConfigSchema, merged);
@@ -217,6 +285,12 @@ export const loadConfigFrom = (
       return yield* new ConfigError({
         reason: `invalid configuration: ${v.summarize(result.issues)}`,
         cause: result.issues,
+      });
+    }
+    // Launching a command drives the focus view, which lives in the process panel.
+    if (result.output.launch !== null && !result.output.process.enabled) {
+      return yield* new ConfigError({
+        reason: "launching a command requires the process panel (remove --no-process)",
       });
     }
     return result.output;

@@ -20,6 +20,19 @@ export interface AppConfig {
   readonly process: { readonly enabled: boolean };
   /** CPU history sparkline width (number of samples shown). */
   readonly sparkline: { readonly width: number };
+  /**
+   * A command to launch under the monitor (`monitor -- <command…>`), or `null`
+   * when only attaching to existing processes. When set, the child is spawned,
+   * auto-pinned in the focus view, and its subtree resources are watched live.
+   * `killOnExit` (default `true`, cleared by `--no-kill-on-exit`) kills the
+   * child's process group when the monitor quits; `stderrLines` bounds the
+   * captured stderr ring buffer feeding the exit report (Feature 5).
+   */
+  readonly launch: {
+    readonly command: ReadonlyArray<string>;
+    readonly killOnExit: boolean;
+    readonly stderrLines: number;
+  } | null;
 }
 
 /** Defaults used when no file/flags override them. */
@@ -32,4 +45,5 @@ export const defaultConfig: AppConfig = {
   disk: { enabled: true },
   process: { enabled: true },
   sparkline: { width: 40 },
+  launch: null,
 };

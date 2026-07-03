@@ -57,8 +57,50 @@ describe("parseArgs", () => {
     expect(parseArgs(["--cpu"]).overrides).toEqual({ cpu: { enabled: true } });
   });
 
-  test("collects unrecognized args", () => {
-    expect(parseArgs(["--bogus", "x"]).unknown).toEqual(["--bogus", "x"]);
+  test("collects unrecognized flag-like args", () => {
+    expect(parseArgs(["--bogus", "--nope"]).unknown).toEqual(["--bogus", "--nope"]);
+  });
+
+  test("a bare positional token starts the launch command (Bun ate our `--`)", () => {
+    // `bun main.ts -- sleep 2` reaches argv as ["sleep","2"] — no `--`.
+    const { overrides, unknown } = parseArgs(["sleep", "2"]);
+    expect(unknown).toEqual([]);
+    expect(overrides.launchCommand).toEqual(["sleep", "2"]);
+  });
+
+  test("a monitor flag before the bare command is still parsed", () => {
+    const { overrides } = parseArgs(["--no-kill-on-exit", "sh", "-c", "echo hi"]);
+    expect(overrides.killOnExit).toBe(false);
+    expect(overrides.launchCommand).toEqual(["sh", "-c", "echo hi"]);
+  });
+
+  test("`--` collects the remainder as the launch command and stops flag parsing", () => {
+    const { overrides, unknown } = parseArgs([
+      "--no-cpu",
+      "--",
+      "sh",
+      "-c",
+      "echo hi",
+      "--not-a-monitor-flag",
+    ]);
+    expect(unknown).toEqual([]); // flags after `--` aren't the monitor's
+    expect(overrides.cpu).toEqual({ enabled: false }); // flags before `--` still parse
+    expect(overrides.launchCommand).toEqual([
+      "sh",
+      "-c",
+      "echo hi",
+      "--not-a-monitor-flag",
+    ]);
+  });
+
+  test("a bare `--` yields an empty launch command", () => {
+    expect(parseArgs(["--"]).overrides.launchCommand).toEqual([]);
+  });
+
+  test("--no-kill-on-exit before `--` sets killOnExit false", () => {
+    const { overrides } = parseArgs(["--no-kill-on-exit", "--", "sleep", "5"]);
+    expect(overrides.killOnExit).toBe(false);
+    expect(overrides.launchCommand).toEqual(["sleep", "5"]);
   });
 });
 
@@ -128,4 +170,43 @@ describe("loadConfigFrom", () => {
 
   test("fails when a numeric flag is not a number", () =>
     expectConfigError(["--refresh", "abc"], /invalid configuration/));
+
+  test("builds a launch config from `--` (defaults: kill on exit, 200 stderr lines)", async () => {
+    const result = await load(["--", "sleep", "5"]);
+    expect(Either.isRight(result)).toBe(true);
+    if (Either.isRight(result)) {
+      expect(result.right.launch).toEqual({
+        command: ["sleep", "5"],
+        killOnExit: true,
+        stderrLines: 200,
+      });
+    }
+  });
+
+  test("--no-kill-on-exit flows into the launch config", async () => {
+    const result = await load(["--no-kill-on-exit", "--", "sleep", "5"]);
+    expect(Either.isRight(result)).toBe(true);
+    if (Either.isRight(result)) {
+      expect(result.right.launch?.killOnExit).toBe(false);
+    }
+  });
+
+  test("launch is null when no `--` is given", async () => {
+    const result = await load([]);
+    expect(Either.isRight(result)).toBe(true);
+    if (Either.isRight(result)) expect(result.right.launch).toBeNull();
+  });
+
+  test("a config file may set launch defaults (stderrLines) used when a command is given", async () => {
+    const path = await writeTmp(JSON.stringify({ launch: { stderrLines: 50 } }));
+    const result = await load(["--config", path, "--", "sleep", "1"]);
+    expect(Either.isRight(result)).toBe(true);
+    if (Either.isRight(result)) expect(result.right.launch?.stderrLines).toBe(50);
+  });
+
+  test("fails on a bare `--` with no command", () =>
+    expectConfigError(["--"], /no command given after/));
+
+  test("fails when launching with the process panel disabled", () =>
+    expectConfigError(["--no-process", "--", "sleep", "1"], /requires the process panel/));
 });

@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { Effect, Exit } from "effect";
 import {
+  aggregateSubtree,
   assembleRecords,
   clampPercent,
+  collectDescendants,
   memPercentOf,
   type PlainFocus,
   type PlainRecord,
   type RawProcess,
+  type SubtreeProc,
   toFocusSnapshot,
   toSnapshot,
 } from "../src/collectors/process-common.ts";
@@ -117,6 +120,7 @@ describe("toFocusSnapshot", () => {
     threadCount: 8,
     openFds: 42,
     status: "running",
+    descendantCount: null,
     ...overrides,
   });
 
@@ -150,5 +154,115 @@ describe("toFocusSnapshot", () => {
       toFocusSnapshot(plain({ threadCount: 1.5 }), "process-focus"),
     );
     expect(Exit.isFailure(exit)).toBe(true);
+  });
+
+  test("carries a subtree descendant count through branding", () => {
+    const snap = Effect.runSync(
+      toFocusSnapshot(plain({ descendantCount: 3 }), "process-focus"),
+    );
+    expect(snap.descendantCount).toBe(3);
+  });
+
+  test("rejects a negative descendant count", () => {
+    const exit = Effect.runSyncExit(
+      toFocusSnapshot(plain({ descendantCount: -1 }), "process-focus"),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+  });
+});
+
+describe("collectDescendants", () => {
+  // Tree: 100 → 200 → 400, and 100 → 300; plus unrelated 500 → 600.
+  const procs = [
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: 100 },
+    { pid: 300, ppid: 100 },
+    { pid: 400, ppid: 200 },
+    { pid: 500, ppid: 1 },
+    { pid: 600, ppid: 500 },
+  ];
+
+  test("collects the root and all transitive descendants", () => {
+    expect([...collectDescendants(procs, 100)].sort((a, b) => a - b)).toEqual([
+      100, 200, 300, 400,
+    ]);
+  });
+
+  test("excludes unrelated subtrees", () => {
+    const set = collectDescendants(procs, 100);
+    expect(set.has(500)).toBe(false);
+    expect(set.has(600)).toBe(false);
+  });
+
+  test("a leaf resolves to just itself", () => {
+    expect([...collectDescendants(procs, 400)]).toEqual([400]);
+  });
+
+  test("includes the root even when it isn't in the sample", () => {
+    expect([...collectDescendants([], 999)]).toEqual([999]);
+  });
+
+  test("is robust to a parent/child cycle (pid reuse)", () => {
+    const cyclic = [
+      { pid: 1, ppid: 2 },
+      { pid: 2, ppid: 1 },
+    ];
+    // Terminates and collects both rather than looping forever.
+    expect([...collectDescendants(cyclic, 1)].sort((a, b) => a - b)).toEqual([1, 2]);
+  });
+});
+
+describe("aggregateSubtree", () => {
+  const sub = (
+    pid: number,
+    ppid: number,
+    cpuCumulative: number,
+    overrides: Partial<SubtreeProc> = {},
+  ): SubtreeProc => ({
+    pid,
+    ppid,
+    cpuCumulative,
+    memBytes: 1000,
+    threads: 2,
+    status: "running",
+    name: `proc-${pid}`,
+    ...overrides,
+  });
+
+  test("sums cpu delta, memory and threads across the subtree", () => {
+    const prev = new Map([
+      [100, 10],
+      [200, 5],
+    ]);
+    const current = [
+      sub(100, 1, 40, { memBytes: 1000, threads: 3 }),
+      sub(200, 100, 25, { memBytes: 2000, threads: 4 }),
+      sub(999, 1, 9999, { memBytes: 8000, threads: 9 }), // unrelated → excluded
+    ];
+    const agg = aggregateSubtree(prev, current, 100);
+    expect(agg.cpuDelta).toBe(30 + 20); // (40-10) + (25-5)
+    expect(agg.memBytes).toBe(3000);
+    expect(agg.threads).toBe(7);
+    expect(agg.descendantCount).toBe(1); // 2 present, minus the root
+    expect(agg.rootPresent).toBe(true);
+    expect(agg.rootName).toBe("proc-100");
+  });
+
+  test("a newly-spawned child (absent from prev) contributes 0 to the cpu delta", () => {
+    const prev = new Map([[100, 10]]);
+    const current = [sub(100, 1, 30), sub(200, 100, 5000)]; // 200 is brand new
+    const agg = aggregateSubtree(prev, current, 100);
+    expect(agg.cpuDelta).toBe(20); // only the root's (30-10); the new child adds 0
+    expect(agg.descendantCount).toBe(1);
+  });
+
+  test("reports the root absent (just exited) with children still lingering", () => {
+    const prev = new Map<number, number>();
+    const current = [sub(200, 100, 5)]; // root 100 gone, child 200 reparented-but-known
+    const agg = aggregateSubtree(prev, current, 100);
+    expect(agg.rootPresent).toBe(false);
+    expect(agg.rootName).toBe(""); // no root record → fallback
+    expect(agg.memBytes).toBe(1000); // the child still counts
+    expect(agg.descendantCount).toBe(0); // 1 present member, minus the (absent) root
   });
 });

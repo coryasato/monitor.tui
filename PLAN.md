@@ -24,7 +24,7 @@ children are killed on monitor quit by default* (`--no-kill-on-exit` to detach).
 
 ---
 
-## Status — Features 0–3 complete; next up: Feature 4
+## Status — Features 0–4 complete; next up: Feature 5
 
 All shipped with `tsc --noEmit` + `bun test` green and a PTY smoke test
 (boots, renders, clean SIGINT, no orphaned collectors). This section is the
@@ -366,7 +366,45 @@ features consume:
 
 ---
 
-### 4 — Run a Command Under the Monitor
+### 4 — Run a Command Under the Monitor ✅ COMPLETE
+
+Shipped green (`tsc --noEmit` + `bun test`, plus a real-PTY smoke driving all four
+milestone forms: `-- sleep 2` auto-pins + exits code 0; `-- sh -c 'echo boom >&2;
+exit 3'` exits code 3; `-- sleep 30` quit-early leaves no orphan; `-- sh -c 'sleep
+6 & sleep 6 & wait'` shows `(+2 descendants)` and the subtree is group-killed on
+quit). Seams Feature 5 consumes:
+
+- **CLI (`src/services/config.ts`):** `AppConfig.launch` is
+  `{ command, killOnExit, stderrLines } | null`. `parseArgs` collects the command
+  from a `--` **or from the first bare positional token** — because **Bun strips a
+  leading `--`** before the script sees it (`bun main.ts -- sleep 2` arrives as
+  `["sleep","2"]`), so the bare-positional path is what actually fires in practice
+  (`monitor sleep 2` works too). `--no-kill-on-exit` clears `killOnExit`. Launch
+  requires the process panel (cross-validated → `ConfigError`); a bare `--` with no
+  command is a `ConfigError`.
+- **`LaunchedProcess` (`src/services/launched-process.ts`):** `launchProcess(cmd,
+  {killOnExit, stderrLines})` is a scope-bound resource. Spawns **detached**
+  (`setsid`, own process group) with `stdout:"ignore"`, `stderr:"pipe"`. Finalizer
+  group-kills (`process.kill(-pid, …)`) unless `killOnExit` is false. Exposes
+  `pid`, `command`, `awaitExit` (wraps `child.exited` → real `{exitCode,
+  signalCode}` — the precise event, no ps-polling), and `stderrTail()` (a bounded
+  **`LineRing`**, exported + unit-tested, fed by a scoped stderr pump). **Feature 5's
+  `launched` report reads `awaitExit` + `stderrTail()`.**
+- **Subtree aggregation:** `ProcessCollector.subtreeFocusStream(pid)` (both
+  platforms) sums the child **+ all descendants** each sample — pure
+  `collectDescendants` / `aggregateSubtree` in `process-common.ts` (ppid-walk;
+  CPU delta only over pids in both samples so fresh forks don't spike). The macOS
+  reader adds `F_PPID`/threads decoding to the existing `read_processes` module (no
+  C change). `ProcessFocusSnapshot.descendantCount` is `number` for a subtree, `null`
+  for a single attached PID; the focus panel appends `(+N descendants)` and keeps
+  the primed command string (not the resolved exe path) for the subtree view.
+- **main.ts wiring:** `pin` refactored to `pinStream(pid, name, stream)`; the
+  launched child auto-pins via `subtreeFocusStream` into `Focus` mode. A forked
+  watcher on `awaitExit` toasts `PID N exited (code C / signal S)` and auto-unpins.
+  `launchedPidRef` makes the attached-PID `checkFocusExit` (ps-absence) skip the
+  launched child, so its exit is handled solely by the precise watcher.
+
+**Original spec (for reference):**
 
 **Goal:** launch a command as a child of the TUI so it can be watched live and produce a real crash report — the "test my program and watch its resources" workflow.
 

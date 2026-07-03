@@ -146,6 +146,12 @@ export interface ProcessListSnapshot {
  * unavailable (never sourced from a per-tick `lsof`). Because only one process is
  * ever pinned, this is stored under the single stable `"process-focus"` tag —
  * each sample overwrites the last.
+ *
+ * `descendantCount` distinguishes the two ways a process is pinned:
+ * - `null` — a single attached PID (Feature 2). The metrics are that PID alone.
+ * - a number ≥ 0 — a launched command (Feature 4). The metrics **sum the whole
+ *   subtree** (child + all descendants, walked via ppid), and this is the count
+ *   of descendants beyond the root, so the focus header can note `(+N descendants)`.
  */
 export interface ProcessFocusSnapshot {
   readonly _tag: "process-focus";
@@ -158,6 +164,7 @@ export interface ProcessFocusSnapshot {
   readonly threadCount: number;
   readonly openFds: number | null;
   readonly status: ProcessStatus;
+  readonly descendantCount: number | null;
 }
 
 /**
