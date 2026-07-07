@@ -31,15 +31,18 @@ import { RenderError } from "../types/errors.ts";
 import type {
   MetricState,
   MetricTag,
+  ProcessFocusSnapshot,
   ProcessId,
   ProcessRecord,
 } from "../types/metrics.ts";
+import type { ProcessExitRecord } from "../types/process-exit.ts";
 import { makeCpuCores } from "../ui/components/cpu-cores.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
 import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
 import { makeDiskReadout } from "../ui/components/disk-readout.ts";
 import { makeMemoryGauge } from "../ui/components/memory-gauge.ts";
 import { makeNetworkReadout } from "../ui/components/network-readout.ts";
+import { makeProcessExitModal } from "../ui/components/process-exit-modal.ts";
 import { makeProcessFocusPanel } from "../ui/components/process-focus-panel.ts";
 import { makeProcessTable } from "../ui/components/process-table.ts";
 import { CollectorsLive } from "./layers.ts";
@@ -197,6 +200,13 @@ const program = Effect.gen(function* () {
     split.add(rightPane);
     renderer.root.add(split);
 
+    // The exit report is a full-pane visible-toggle overlay (like the grid↔focus
+    // swap above) rather than a true z-index overlay — OpenTUI has no
+    // overlay/z-index primitive. It replaces `split` entirely while open.
+    const exitModal = makeProcessExitModal(renderer);
+    exitModal.root.visible = false;
+    renderer.root.add(exitModal.root);
+
     // The table is a render-tick panel like the widgets (data tick → update);
     // its Normal-mode key handlers route through the InputRouter.
     panels.push({
@@ -205,19 +215,31 @@ const program = Effect.gen(function* () {
       apply: (state) => table.update(state),
     });
 
-    // --- Focus view lifecycle (Feature 2) -----------------------------------
+    // --- Focus view lifecycle -------------------------------------------------
     // The pinned PID and the PID-scoped focus collector fiber live in UI state.
     // The collector is forked into a single closeable scope opened here and
     // closed on program teardown, so a clean quit always interrupts it.
     const pinnedRef = yield* Ref.make<Option.Option<ProcessId>>(Option.none());
-    // The PID of a launched child (Feature 4), if any. Its exit is detected
-    // precisely via the subprocess handle, so the ps-absence check below skips it.
+    // The PID of a launched child, if any. Its exit is detected precisely via
+    // the subprocess handle, so the ps-absence check below skips it.
     const launchedPidRef =
       yield* Ref.make<Option.Option<ProcessId>>(Option.none());
     const focusFiberRef =
       yield* Ref.make<Option.Option<Fiber.RuntimeFiber<void>>>(Option.none());
     const focusScope = yield* Scope.make();
     yield* Effect.addFinalizer(() => Scope.close(focusScope, Exit.void));
+
+    // The pinned process's display name and its last *observed* focus sample
+    // (cleared on every fresh pin, updated on every `ok` sample) — the
+    // source for a `ProcessExitRecord`'s `finalCpuPercent`/`finalMemBytes` at the
+    // moment the process disappears, since by then the focus stream has usually
+    // already gone unavailable. `exitRecordRef` holds the most recent captured
+    // report ('l' in Normal mode opens it, until the next pin replaces it).
+    const pinnedNameRef = yield* Ref.make<string>("");
+    const lastFocusSampleRef =
+      yield* Ref.make<Option.Option<ProcessFocusSnapshot>>(Option.none());
+    const exitRecordRef =
+      yield* Ref.make<Option.Option<ProcessExitRecord>>(Option.none());
 
     const stopFocus = Effect.gen(function* () {
       const prev = yield* Ref.getAndSet(focusFiberRef, Option.none());
@@ -246,11 +268,18 @@ const program = Effect.gen(function* () {
         yield* stopFocus; // replace any prior pin
         focusPanel.prime(pid, name);
         yield* Ref.set(pinnedRef, Option.some(pid));
+        yield* Ref.set(pinnedNameRef, name);
+        yield* Ref.set(lastFocusSampleRef, Option.none());
         const fiber = yield* stream.pipe(
           Stream.runForEach((state) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               focusPanel.update(Option.some(state));
               renderer.requestRender();
+              // Track the last *ok* sample so an exit report has final resource
+              // numbers even after the stream goes unavailable.
+              if (state._tag === "ok" && state.snapshot._tag === "process-focus") {
+                yield* Ref.set(lastFocusSampleRef, Option.some(state.snapshot));
+              }
             }),
           ),
           Effect.forkIn(focusScope),
@@ -264,9 +293,45 @@ const program = Effect.gen(function* () {
     const pin = (sel: ProcessRecord): Effect.Effect<void> =>
       pinStream(sel.pid, sel.name, processes.focusStream(sel.pid));
 
-    // Normal mode: `Enter` pins the highlighted row, `/` enters Filter mode
-    // (Feature 3) — both suppressed while a kill confirm is open; every other
-    // key drives the table.
+    // --- Exit report -----------------------------------------------------------
+    // The last observed focus sample (before the stream went unavailable) is the
+    // source for a report's `finalCpuPercent`/`finalMemBytes`, for either origin.
+    const finalResources: Effect.Effect<{
+      finalCpuPercent: ProcessFocusSnapshot["cpuPercent"] | null;
+      finalMemBytes: ProcessFocusSnapshot["memBytes"] | null;
+    }> = Ref.get(lastFocusSampleRef).pipe(
+      Effect.map((last) => ({
+        finalCpuPercent: Option.isSome(last) ? last.value.cpuPercent : null,
+        finalMemBytes: Option.isSome(last) ? last.value.memBytes : null,
+      })),
+    );
+
+    // 'l' opens the exit report captured at the last exit (Normal mode, whenever
+    // one exists — the toast that triggered it may already have faded). A
+    // full-pane visible-toggle overlay: hide `split`, show `exitModal`, and enter
+    // the InputRouter's `Modal` mode.
+    const openExitModal = Effect.gen(function* () {
+      const record = yield* Ref.get(exitRecordRef);
+      if (Option.isNone(record)) return;
+      exitModal.show(record.value);
+      split.visible = false;
+      exitModal.root.visible = true;
+      yield* router.setMode("Modal");
+      renderer.requestRender();
+    });
+
+    // Dismiss returns to Focus if a process is (still) pinned, else Normal.
+    const closeExitModal = Effect.gen(function* () {
+      split.visible = true;
+      exitModal.root.visible = false;
+      const pinned = yield* Ref.get(pinnedRef);
+      yield* router.setMode(Option.isSome(pinned) ? "Focus" : "Normal");
+      renderer.requestRender();
+    });
+
+    // Normal mode: `Enter` pins the highlighted row, `/` enters Filter mode,
+    // `l` opens the last exit report — all suppressed while a kill confirm is
+    // open; every other key drives the table.
     yield* router.register("Normal", (key) => {
       if (key.name === "return") {
         return Effect.suspend(() => {
@@ -282,13 +347,25 @@ const program = Effect.gen(function* () {
           return router.setMode("Filter");
         });
       }
+      if (key.name === "l") {
+        return Effect.suspend(() =>
+          table.isAwaitingConfirm() ? Effect.void : openExitModal,
+        );
+      }
       return Effect.sync(() => table.onKey(key));
     });
     // Focus mode: `Escape` unpins; quit keys are handled by the router itself.
     yield* router.register("Focus", (key) =>
       key.name === "escape" ? unpin : Effect.void,
     );
-    // Filter mode (Feature 3): `Enter` locks the query and returns to Normal
+    // Modal mode: `Escape`/`d` dismiss; everything else scrolls the stderr tail
+    // (a no-op for a record with no lines, e.g. an attached PID's degraded
+    // notice).
+    yield* router.register("Modal", (key) => {
+      if (key.name === "escape" || key.name === "d") return closeExitModal;
+      return Effect.sync(() => exitModal.onKey(key));
+    });
+    // Filter mode: `Enter` locks the query and returns to Normal
     // (table stays filtered, `/` re-edits); `Escape` clears the query and
     // returns to Normal; every other key edits the query text. `q`/`k` are
     // literal here — only Ctrl+C quits (InputRouter's mode-aware quit rule).
@@ -309,7 +386,7 @@ const program = Effect.gen(function* () {
     // Exit detection (attached PID): when the pinned process disappears from the
     // process list, auto-unpin and toast. Runs once per render tick (≤ one poll
     // interval of latency — the best-effort path the plan describes). A launched
-    // child (Feature 4) will instead signal exit precisely via its handle.
+    // child will instead signal exit precisely via its handle.
     checkFocusExit = Effect.gen(function* () {
       const pinned = yield* Ref.get(pinnedRef);
       if (Option.isNone(pinned)) return;
@@ -323,12 +400,25 @@ const program = Effect.gen(function* () {
       if (s._tag !== "ok" || s.snapshot._tag !== "process") return;
       const present = s.snapshot.processes.some((p) => p.pid === pinned.value);
       if (!present) {
-        table.notify(`PID ${pinned.value as number} exited`);
+        const name = yield* Ref.get(pinnedNameRef);
+        const { finalCpuPercent, finalMemBytes } = yield* finalResources;
+        const record: ProcessExitRecord = {
+          origin: "attached",
+          pid: pinned.value,
+          name,
+          exitCode: null,
+          exitSignal: null,
+          stderrTail: null,
+          finalCpuPercent,
+          finalMemBytes,
+        };
+        yield* Ref.set(exitRecordRef, Option.some(record));
+        table.notify(`PID ${pinned.value as number} exited — 'l' for details`);
         yield* unpin;
       }
     });
 
-    // --- Launched command (Feature 4) ----------------------------------------
+    // --- Launched command --------------------------------------------------
     // `monitor -- <command…>`: spawn the command as our child (a scope-bound
     // resource — killed with its subtree on quit unless `--no-kill-on-exit`),
     // auto-pin its aggregated subtree in the focus view, and watch its precise
@@ -358,8 +448,21 @@ const program = Effect.gen(function* () {
                       : info.signalCode !== null
                         ? `signal ${info.signalCode}`
                         : "unknown";
+                  const { finalCpuPercent, finalMemBytes } =
+                    yield* finalResources;
+                  const record: ProcessExitRecord = {
+                    origin: "launched",
+                    pid: handle.pid,
+                    name: handle.command,
+                    exitCode: info.exitCode,
+                    exitSignal: info.signalCode,
+                    stderrTail: handle.stderrTail(),
+                    finalCpuPercent,
+                    finalMemBytes,
+                  };
+                  yield* Ref.set(exitRecordRef, Option.some(record));
                   table.notify(
-                    `PID ${handle.pid as number} exited (${detail})`,
+                    `PID ${handle.pid as number} exited (${detail}) — 'l' for details`,
                   );
                   const pinned = yield* Ref.get(pinnedRef);
                   if (Option.isSome(pinned) && pinned.value === handle.pid) {
@@ -433,7 +536,7 @@ const program = Effect.gen(function* () {
         debugLine.content = `render error: ${error.reason}`;
       }),
     ),
-    // After painting, detect a pinned process that has exited (Feature 2).
+    // After painting, detect a pinned process that has exited.
     Effect.zipRight(checkFocusExit),
     Effect.repeat(Schedule.spaced(Duration.millis(config.refreshMs))),
     Effect.forkScoped,

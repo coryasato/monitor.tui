@@ -24,7 +24,7 @@ children are killed on monitor quit by default* (`--no-kill-on-exit` to detach).
 
 ---
 
-## Status — Features 0–4 complete; next up: Feature 5
+## Status — Features 0–5 complete; next up: Feature 6
 
 All shipped with `tsc --noEmit` + `bun test` green and a PTY smoke test
 (boots, renders, clean SIGINT, no orphaned collectors). This section is the
@@ -422,7 +422,48 @@ quit). Seams Feature 5 consumes:
 
 ---
 
-### 5 — Process Exit Report (two tiers)
+### 5 — Process Exit Report (two tiers) ✅ COMPLETE
+
+Shipped green (`tsc --noEmit` + `bun test`, plus real-PTY smokes: `monitor --
+sh -c 'echo boom >&2; exit 3'` then `l` shows `exit code 3` + `boom` in the
+stderr tail; separately, filtering to and pinning an attached `sleep`, killing
+it externally, then `l` shows `attached process — exit code and output
+unavailable` with the last-observed final CPU/MEM). No seams noted for later
+features — Feature 6 doesn't consume this one.
+
+- **Types** (`src/types/process-exit.ts`, new file — deliberately *not* added to
+  `types/metrics.ts`, since a `ProcessExitRecord` never flows through the
+  `MetricsStore`): `LaunchedExitRecord | AttachedExitRecord`, discriminated on
+  `origin`, both carrying `pid`, `name`, `finalCpuPercent: Percent | null`,
+  `finalMemBytes: Bytes | null`. Only `launched` carries `exitCode`,
+  `exitSignal`, `stderrTail`; `attached` types those `null`.
+- **Capture (`main.ts`, no collector changes)**: a `lastFocusSampleRef` is reset
+  on every fresh pin and updated on every **`ok`** sample from the pinned
+  process/subtree's focus stream (inside `pinStream`'s `Stream.runForEach`) —
+  this is the source of `finalCpuPercent`/`finalMemBytes` for *either* origin,
+  since by the time exit is detected the focus stream has usually already gone
+  `unavailable`. A `pinnedNameRef` tracks the display name (attached exit has no
+  other source once the PID is gone from `ps`). `exitRecordRef` holds the most
+  recently captured record — `attached` built in `checkFocusExit`'s ps-absence
+  branch (before `unpin`), `launched` built in the `handle.awaitExit` watcher
+  (using `handle.stderrTail()` + the real `exitCode`/`signalCode`).
+- **UI (`src/ui/components/process-exit-modal.ts`)**: a **full-pane
+  visible-toggle overlay**, not a z-index overlay (OpenTUI has none) — `main.ts`
+  toggles `split.visible` / `exitModal.root.visible` exactly like the Feature 2
+  grid↔focus swap. `show(record)` primes content + resets scroll; `onKey` only
+  moves the stderr scroll cursor (Escape/`d` are intercepted by `main.ts`, not
+  passed through). Stderr scrolling **reuses `clampScroll` + the row-pool
+  windowing pattern from `process-table.ts`** verbatim (a `cursor` index moved
+  by arrows/pageup/pagedown, clamped into `[0, total-1]`, then `clampScroll`
+  derives the minimal-adjustment `offset` — the same mechanics as table
+  selection, not a bespoke scrollbar).
+- **Input wiring**: `l` in `Normal` mode opens the modal (only if
+  `exitRecordRef` is `Some` — the toast that announced it may have already
+  faded, so `l` works independently of toast visibility) via a new
+  `InputRouter.register("Modal", …)` handler; dismiss returns to `Focus` if a
+  process is still pinned, else `Normal`.
+
+**Original spec (for reference):**
 
 **Goal:** when a pinned process exits, surface what we can — a full crash report for processes we launched, an honest degraded notice for attached PIDs.
 
