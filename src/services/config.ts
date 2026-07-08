@@ -29,6 +29,8 @@ export interface CliOverrides {
   disk?: { enabled?: boolean };
   process?: { enabled?: boolean };
   sparklineWidth?: number;
+  /** `--notify`/`--no-notify`; unset means "use file/default". Thresholds themselves are file-only (see `AppConfig.alerts`), matching `launch.stderrLines`. */
+  notify?: boolean;
   /** The command after `--` (everything following it, verbatim). Empty = `--` with no command. */
   launchCommand?: ReadonlyArray<string>;
   /** `--no-kill-on-exit` sets `false`; unset means "use file/default". */
@@ -111,6 +113,12 @@ export const parseArgs = (
       case "--no-process":
         overrides.process = { enabled: false };
         break;
+      case "--notify":
+        overrides.notify = true;
+        break;
+      case "--no-notify":
+        overrides.notify = false;
+        break;
       case "--kill-on-exit":
         overrides.killOnExit = true;
         break;
@@ -136,6 +144,22 @@ const FileConfigSchema = v.object({
   disk: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   process: v.optional(v.object({ enabled: v.optional(v.boolean()) })),
   sparkline: v.optional(v.object({ width: v.optional(v.number()) })),
+  // Thresholds are file-only (no CLI flags — six numbers is too many); `notify`
+  // also has a CLI override (`--notify`/`--no-notify`), read separately below.
+  alerts: v.optional(
+    v.object({
+      cpu: v.optional(
+        v.object({ warn: v.optional(v.number()), critical: v.optional(v.number()) }),
+      ),
+      memory: v.optional(
+        v.object({ warn: v.optional(v.number()), critical: v.optional(v.number()) }),
+      ),
+      disk: v.optional(
+        v.object({ warn: v.optional(v.number()), critical: v.optional(v.number()) }),
+      ),
+      notify: v.optional(v.boolean()),
+    }),
+  ),
   // The command itself only comes from the CLI (after `--`); the file may set the
   // launch *defaults* (kill behavior + stderr buffer size) for when one is given.
   launch: v.optional(
@@ -146,6 +170,16 @@ const FileConfigSchema = v.object({
   ),
 });
 type FileConfig = v.InferOutput<typeof FileConfigSchema>;
+
+/** A warn/critical pair, `warn <= critical`, values in `[0, max]`. */
+const thresholdPair = (max: number) =>
+  v.pipe(
+    v.object({
+      warn: v.pipe(v.number(), v.minValue(0), v.maxValue(max)),
+      critical: v.pipe(v.number(), v.minValue(0), v.maxValue(max)),
+    }),
+    v.check((t) => t.warn <= t.critical, "warn must be <= critical"),
+  );
 
 /** Final schema with real ranges; failure here is a fatal `ConfigError`. */
 const AppConfigSchema = v.object({
@@ -158,6 +192,13 @@ const AppConfigSchema = v.object({
   process: v.object({ enabled: v.boolean() }),
   sparkline: v.object({
     width: v.pipe(v.number(), v.integer(), v.minValue(4), v.maxValue(200)),
+  }),
+  alerts: v.object({
+    cpu: thresholdPair(100),
+    memory: thresholdPair(100),
+    // MB/s throughput, not a percentage — no natural upper ceiling.
+    disk: thresholdPair(Number.MAX_SAFE_INTEGER),
+    notify: v.boolean(),
   }),
   launch: v.nullable(
     v.object({
@@ -203,6 +244,21 @@ export const mergeConfig = (
   },
   sparkline: {
     width: cli.sparklineWidth ?? file.sparkline?.width ?? base.sparkline.width,
+  },
+  alerts: {
+    cpu: {
+      warn: file.alerts?.cpu?.warn ?? base.alerts.cpu.warn,
+      critical: file.alerts?.cpu?.critical ?? base.alerts.cpu.critical,
+    },
+    memory: {
+      warn: file.alerts?.memory?.warn ?? base.alerts.memory.warn,
+      critical: file.alerts?.memory?.critical ?? base.alerts.memory.critical,
+    },
+    disk: {
+      warn: file.alerts?.disk?.warn ?? base.alerts.disk.warn,
+      critical: file.alerts?.disk?.critical ?? base.alerts.disk.critical,
+    },
+    notify: cli.notify ?? file.alerts?.notify ?? base.alerts.notify,
   },
   // A launch config exists only when a command was given after `--`; its kill
   // behavior and buffer size fall back through cli < file < defaults.

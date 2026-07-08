@@ -7,20 +7,29 @@ import {
 } from "@opentui/core";
 import { Option } from "effect";
 import type { MetricState } from "../../types/metrics.ts";
+import { type AlertThresholds, alertColor, resolveAlert } from "../alerts.ts";
 import { formatRate } from "../format.ts";
 
 /**
  * Disk readout: combined I/O throughput as text (no bar — throughput has no
- * natural 0–100 ceiling). A passive view; `update` is pushed the latest store
- * state from the render tick.
+ * natural 0–100 ceiling to fill a bar against). A passive view; `update` is
+ * pushed the latest store state from the render tick. Unlike CPU/memory,
+ * `thresholds` here are MB/s (binary MiB, matching `formatRate`), not a
+ * percentage — the value text still colors green/amber/red via the shared
+ * `resolveAlert`/`alertColor`.
  */
+
+const MIB = 1024 * 1024;
 
 export interface DiskReadout {
   readonly root: Renderable;
   readonly update: (state: Option.Option<MetricState>) => void;
 }
 
-export function makeDiskReadout(renderer: CliRenderer): DiskReadout {
+export function makeDiskReadout(
+  renderer: CliRenderer,
+  thresholds: AlertThresholds,
+): DiskReadout {
   const title = new TextRenderable(renderer, {
     id: "disk-title",
     content: "DISK",
@@ -58,7 +67,7 @@ export function makeDiskReadout(renderer: CliRenderer): DiskReadout {
           return;
         }
         value.content = `I/O ${formatRate(s.snapshot.bytesPerSec)}`;
-        value.fg = "#F8F8F2";
+        value.fg = alertColor(resolveAlert(s.snapshot.bytesPerSec / MIB, thresholds));
       },
     });
 

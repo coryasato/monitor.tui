@@ -7,6 +7,7 @@ import {
 } from "@opentui/core";
 import { Option } from "effect";
 import type { MetricState } from "../../types/metrics.ts";
+import { type AlertThresholds, alertColor, resolveAlert } from "../alerts.ts";
 
 /**
  * CPU gauge: a bordered panel with a usage line and a colored bar. It is a
@@ -42,7 +43,10 @@ export interface CpuGauge {
   readonly showDebug: (message: string) => void;
 }
 
-export function makeCpuGauge(renderer: CliRenderer): CpuGauge {
+export function makeCpuGauge(
+  renderer: CliRenderer,
+  thresholds: AlertThresholds,
+): CpuGauge {
   const title = new TextRenderable(renderer, {
     id: "cpu-title",
     content: "CPU",
@@ -98,7 +102,7 @@ export function makeCpuGauge(renderer: CliRenderer): CpuGauge {
         value.content = `user ${fmt(snap.user)}%   sys ${fmt(snap.system)}%   idle ${fmt(snap.idle)}%`;
         value.fg = "#F8F8F2";
         bar.content = `${renderBar(used)} ${fmt(used)}%`;
-        bar.fg = loadColor(used);
+        bar.fg = alertColor(resolveAlert(used, thresholds));
       },
     });
 

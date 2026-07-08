@@ -25,10 +25,12 @@ import { launchProcess } from "../services/launched-process.ts";
 import { MemoryCollector } from "../services/memory-collector.ts";
 import { MetricsStore, MetricsStoreLive } from "../services/metrics-store.ts";
 import { NetworkCollector } from "../services/network-collector.ts";
+import { sendNotification } from "../services/notify.ts";
 import { ProcessCollector } from "../services/process-collector.ts";
 import { Renderer, RendererLive } from "../services/renderer.ts";
 import { RenderError } from "../types/errors.ts";
 import type {
+  MetricSnapshot,
   MetricState,
   MetricTag,
   ProcessFocusSnapshot,
@@ -36,6 +38,7 @@ import type {
   ProcessRecord,
 } from "../types/metrics.ts";
 import type { ProcessExitRecord } from "../types/process-exit.ts";
+import { type AlertState, crossedIntoCritical, resolveAlert } from "../ui/alerts.ts";
 import { makeCpuCores } from "../ui/components/cpu-cores.ts";
 import { makeCpuGauge } from "../ui/components/cpu-gauge.ts";
 import { makeCpuSparkline } from "../ui/components/cpu-sparkline.ts";
@@ -90,7 +93,7 @@ const program = Effect.gen(function* () {
   const cells: Renderable[] = [];
 
   if (config.cpu.enabled) {
-    const cpuGauge = makeCpuGauge(renderer);
+    const cpuGauge = makeCpuGauge(renderer, config.alerts.cpu);
     const sparkline = makeCpuSparkline(renderer, config.sparkline.width);
     cells.push(cpuGauge.root, sparkline.root);
     panels.push({
@@ -114,7 +117,7 @@ const program = Effect.gen(function* () {
   }
 
   if (config.memory.enabled) {
-    const memGauge = makeMemoryGauge(renderer);
+    const memGauge = makeMemoryGauge(renderer, config.alerts.memory);
     cells.push(memGauge.root);
     panels.push({
       tag: "memory",
@@ -134,7 +137,7 @@ const program = Effect.gen(function* () {
   }
 
   if (config.disk.enabled) {
-    const diskReadout = makeDiskReadout(renderer);
+    const diskReadout = makeDiskReadout(renderer, config.alerts.disk);
     cells.push(diskReadout.root);
     panels.push({
       tag: "disk",
@@ -160,6 +163,63 @@ const program = Effect.gen(function* () {
   // Per-tick focus-exit check, wired below only when the process panel exists.
   // Default no-op so the render-tick loop can call it unconditionally.
   let checkFocusExit: Effect.Effect<void> = Effect.void;
+
+  // --- Alerts & notifications -------------------------------------------------
+  // Optional best-effort OS notification on first crossing into "critical",
+  // debounced via each metric's previous AlertState (so it fires once per
+  // crossing, not once per sample while it stays critical). No-op unless
+  // `alerts.notify` is on — the gauge/readout coloring above is unconditional
+  // and needs no per-tick check of its own.
+  let checkAlerts: Effect.Effect<void, never, Scope.Scope> = Effect.void;
+  if (config.alerts.notify) {
+    const alertSources: ReadonlyArray<{
+      readonly tag: "cpu" | "memory" | "disk";
+      readonly label: string;
+      readonly thresholds: { readonly warn: number; readonly critical: number };
+      readonly valueOf: (snapshot: MetricSnapshot) => number;
+    }> = [
+      {
+        tag: "cpu",
+        label: "CPU",
+        thresholds: config.alerts.cpu,
+        valueOf: (s) => (s._tag === "cpu" ? s.user + s.system : 0),
+      },
+      {
+        tag: "memory",
+        label: "Memory",
+        thresholds: config.alerts.memory,
+        valueOf: (s) => (s._tag === "memory" ? s.usedPercent : 0),
+      },
+      {
+        tag: "disk",
+        label: "Disk I/O",
+        thresholds: config.alerts.disk,
+        valueOf: (s) => (s._tag === "disk" ? s.bytesPerSec / (1024 * 1024) : 0),
+      },
+    ];
+    const lastAlertState = new Map<MetricTag, AlertState>();
+    checkAlerts = Effect.forEach(
+      alertSources,
+      (source) =>
+        Effect.gen(function* () {
+          const state = yield* store.get(source.tag);
+          if (Option.isNone(state) || state.value._tag !== "ok") return;
+          const next = resolveAlert(source.valueOf(state.value.snapshot), source.thresholds);
+          const previous = lastAlertState.get(source.tag) ?? "ok";
+          lastAlertState.set(source.tag, next);
+          if (crossedIntoCritical(previous, next)) {
+            // Forked (not awaited) so a slow/missing `osascript`/`notify-send`
+            // never stalls the render tick — never blocking the main TUI loop
+            // matters more than the notification landing.
+            yield* sendNotification(
+              "monitor.tui",
+              `${source.label} crossed into critical`,
+            ).pipe(Effect.forkScoped);
+          }
+        }),
+      { discard: true },
+    );
+  }
 
   // Layout. With the process panel enabled we split into two columns — the
   // process table on the left, the widget grid on the right. Disabled → the
@@ -536,8 +596,10 @@ const program = Effect.gen(function* () {
         debugLine.content = `render error: ${error.reason}`;
       }),
     ),
-    // After painting, detect a pinned process that has exited.
+    // After painting, detect a pinned process that has exited and check alert
+    // crossings for the optional OS notification.
     Effect.zipRight(checkFocusExit),
+    Effect.zipRight(checkAlerts),
     Effect.repeat(Schedule.spaced(Duration.millis(config.refreshMs))),
     Effect.forkScoped,
   );

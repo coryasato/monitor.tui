@@ -8,6 +8,9 @@ import {
   renderBar,
 } from "../src/ui/components/cpu-gauge.ts";
 import { Percent, Timestamp, type MetricState } from "../src/types/metrics.ts";
+import type { AlertThresholds } from "../src/ui/alerts.ts";
+
+const thresholds: AlertThresholds = { warn: 75, critical: 90 };
 
 const okState = (user: number, system: number, idle: number): MetricState => ({
   _tag: "ok",
@@ -35,7 +38,7 @@ const withGauge = async (
     height: 12,
   });
   try {
-    const gauge = makeCpuGauge(renderer);
+    const gauge = makeCpuGauge(renderer, thresholds);
     renderer.root.add(gauge.root);
     await body({ gauge, renderOnce, frame: captureCharFrame });
   } finally {

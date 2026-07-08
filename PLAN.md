@@ -24,7 +24,7 @@ children are killed on monitor quit by default* (`--no-kill-on-exit` to detach).
 
 ---
 
-## Status — Features 0–5 complete; next up: Feature 6
+## Status — Features 0–6 complete; "Next Features" is now empty — pick from "UI Polish & Layout (Backlog)" next
 
 All shipped with `tsc --noEmit` + `bun test` green and a PTY smoke test
 (boots, renders, clean SIGINT, no orphaned collectors). This section is the
@@ -479,7 +479,46 @@ features — Feature 6 doesn't consume this one.
 
 ---
 
-### 6 — Alerts & Thresholds
+### 6 — Alerts & Thresholds ✅ COMPLETE
+
+Shipped green (`tsc --noEmit` + `bun test`), plus a real-PTY smoke: a config
+file pinning `alerts.cpu.warn`/`critical` to `0` turns the CPU bar red
+(`#FF5555`) on the very first real sample. No seams noted for later features —
+this closes out "Next Features"; only backlog UI-polish items (no specs yet)
+remain.
+
+- **Config** (`src/types/config.ts` + `src/services/config.ts`): `AppConfig.alerts`
+  — `cpu`/`memory` thresholds as `usedPercent` in `[0,100]`; **`disk` is MB/s
+  throughput** (binary MiB, matching `formatRate`), not a percentage — disk has
+  no natural 0–100 ceiling and this feature adds no new collector, so it
+  thresholds the existing `bytesPerSec` instead of capacity. `notify: boolean`
+  (default `false`). Thresholds are **file-only** (six numbers is too many CLI
+  flags, mirroring `launch.stderrLines`); `notify` also has `--notify`/
+  `--no-notify`. Valibot's `v.check` enforces `warn <= critical` per pair
+  (fatal `ConfigError` otherwise, same as any other invalid config).
+- **`src/ui/alerts.ts`** (new, pure): `AlertState = "ok" | "warn" | "critical"`,
+  `resolveAlert(value, thresholds)`, `alertColor(state)` (green/amber/red — the
+  same three hexes `loadColor` already used), and `crossedIntoCritical(prev,
+  next)` — the notification debounce predicate. `cpu-gauge.ts`,
+  `memory-gauge.ts`, and `disk-readout.ts` each now take an `AlertThresholds`
+  constructor arg and color their bar/value text through these instead of the
+  old hardcoded `loadColor`. **`loadColor` itself is untouched** — `cpu-cores.ts`
+  still uses it for per-core bars, which this feature deliberately doesn't
+  bring under config (no per-core thresholds in scope).
+- **Notification** (`src/services/notify.ts`, new): `sendNotification(title,
+  message)` shells out to `osascript` (macOS) / `notify-send` (Linux) via
+  `Bun.$`, **never fails** (`Effect.catchAll` swallows a missing binary or a
+  bad spawn — the in-TUI color is the ground truth either way). `main.ts`
+  forks it (`Effect.forkScoped`) rather than awaiting it, so a slow/missing
+  notifier can't stall the render tick.
+- **Crossing detection** (`main.ts`, gated on `config.alerts.notify`): a
+  `checkAlerts` effect (same per-tick shape as Feature 2's `checkFocusExit`)
+  reads `cpu`/`memory`/`disk` from the `MetricsStore`, resolves each through
+  `resolveAlert`, and compares against a `Map<MetricTag, AlertState>` of the
+  previous tick's state to fire `crossedIntoCritical` exactly once per
+  crossing — not once per sample while a metric stays critical.
+
+**Original spec (for reference):**
 
 **Goal:** configurable high-watermark alerts that flash a panel red and optionally emit a system notification.
 

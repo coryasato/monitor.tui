@@ -7,12 +7,14 @@ import {
 } from "@opentui/core";
 import { Option } from "effect";
 import type { MetricState } from "../../types/metrics.ts";
-import { loadColor, renderBar } from "./cpu-gauge.ts";
+import { type AlertThresholds, alertColor, resolveAlert } from "../alerts.ts";
+import { renderBar } from "./cpu-gauge.ts";
 
 /**
  * Memory gauge: used %, a colored bar, and used/total in GiB. A passive view —
  * `update` is pushed the latest store state from the render-tick loop, mirroring
- * `CpuGauge`. Reuses `renderBar`/`loadColor` so the two gauges stay consistent.
+ * `CpuGauge`. Reuses `renderBar` (and the shared `resolveAlert`/`alertColor`) so
+ * the two gauges stay consistent.
  */
 
 const GIB = 1024 ** 3;
@@ -23,7 +25,10 @@ export interface MemoryGauge {
   readonly update: (state: Option.Option<MetricState>) => void;
 }
 
-export function makeMemoryGauge(renderer: CliRenderer): MemoryGauge {
+export function makeMemoryGauge(
+  renderer: CliRenderer,
+  thresholds: AlertThresholds,
+): MemoryGauge {
   const title = new TextRenderable(renderer, {
     id: "mem-title",
     content: "MEM",
@@ -74,7 +79,7 @@ export function makeMemoryGauge(renderer: CliRenderer): MemoryGauge {
         value.content = `used ${usedPercent.toFixed(1)}%   ${toGiB(usedBytes)} / ${toGiB(totalBytes)} GiB`;
         value.fg = "#F8F8F2";
         bar.content = `${renderBar(usedPercent)} ${usedPercent.toFixed(1)}%`;
-        bar.fg = loadColor(usedPercent);
+        bar.fg = alertColor(resolveAlert(usedPercent, thresholds));
       },
     });
 

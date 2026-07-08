@@ -11,8 +11,10 @@ import {
   Percent,
   Timestamp,
 } from "../src/types/metrics.ts";
+import type { AlertThresholds } from "../src/ui/alerts.ts";
 
 const GIB = 1024 ** 3;
+const thresholds: AlertThresholds = { warn: 80, critical: 95 };
 
 const memOk = (
   usedPercent: number,
@@ -43,7 +45,7 @@ const withGauge = async (
     height: 10,
   });
   try {
-    const gauge = makeMemoryGauge(renderer);
+    const gauge = makeMemoryGauge(renderer, thresholds);
     renderer.root.add(gauge.root);
     await body({ gauge, renderOnce, frame: captureCharFrame });
   } finally {

@@ -21,12 +21,26 @@ export interface AppConfig {
   /** CPU history sparkline width (number of samples shown). */
   readonly sparkline: { readonly width: number };
   /**
+   * High-watermark alert thresholds. CPU/memory are `usedPercent` in [0,100];
+   * disk is combined I/O throughput in MB/s (binary MiB, matching
+   * `formatRate`) since disk has no natural 0–100 ceiling to threshold a
+   * percentage against. `notify` fires a best-effort OS notification
+   * (`osascript`/`notify-send`) once per crossing into `critical`. Network is
+   * excluded entirely — same "no natural ceiling" reasoning as disk's rate.
+   */
+  readonly alerts: {
+    readonly cpu: { readonly warn: number; readonly critical: number };
+    readonly memory: { readonly warn: number; readonly critical: number };
+    readonly disk: { readonly warn: number; readonly critical: number };
+    readonly notify: boolean;
+  };
+  /**
    * A command to launch under the monitor (`monitor -- <command…>`), or `null`
    * when only attaching to existing processes. When set, the child is spawned,
    * auto-pinned in the focus view, and its subtree resources are watched live.
    * `killOnExit` (default `true`, cleared by `--no-kill-on-exit`) kills the
    * child's process group when the monitor quits; `stderrLines` bounds the
-   * captured stderr ring buffer feeding the exit report (Feature 5).
+   * captured stderr ring buffer feeding the exit report.
    */
   readonly launch: {
     readonly command: ReadonlyArray<string>;
@@ -45,5 +59,11 @@ export const defaultConfig: AppConfig = {
   disk: { enabled: true },
   process: { enabled: true },
   sparkline: { width: 40 },
+  alerts: {
+    cpu: { warn: 75, critical: 90 },
+    memory: { warn: 80, critical: 95 },
+    disk: { warn: 80, critical: 95 },
+    notify: false,
+  },
   launch: null,
 };

@@ -10,6 +10,9 @@ import {
   type MetricState,
   Timestamp,
 } from "../src/types/metrics.ts";
+import type { AlertThresholds } from "../src/ui/alerts.ts";
+
+const thresholds: AlertThresholds = { warn: 80, critical: 95 };
 
 const diskOk = (bytesPerSec: number): MetricState => ({
   _tag: "ok",
@@ -34,7 +37,7 @@ const withReadout = async (
     height: 8,
   });
   try {
-    const readout = makeDiskReadout(renderer);
+    const readout = makeDiskReadout(renderer, thresholds);
     renderer.root.add(readout.root);
     await body({ readout, renderOnce, frame: captureCharFrame });
   } finally {

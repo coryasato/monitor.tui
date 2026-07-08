@@ -57,6 +57,11 @@ describe("parseArgs", () => {
     expect(parseArgs(["--cpu"]).overrides).toEqual({ cpu: { enabled: true } });
   });
 
+  test("parses --notify / --no-notify", () => {
+    expect(parseArgs(["--notify"]).overrides).toEqual({ notify: true });
+    expect(parseArgs(["--no-notify"]).overrides).toEqual({ notify: false });
+  });
+
   test("collects unrecognized flag-like args", () => {
     expect(parseArgs(["--bogus", "--nope"]).unknown).toEqual(["--bogus", "--nope"]);
   });
@@ -209,4 +214,55 @@ describe("loadConfigFrom", () => {
 
   test("fails when launching with the process panel disabled", () =>
     expectConfigError(["--no-process", "--", "sleep", "1"], /requires the process panel/));
+
+  test("alerts default to the built-in thresholds with notify off", async () => {
+    const result = await load([]);
+    expect(Either.isRight(result)).toBe(true);
+    if (Either.isRight(result)) expect(result.right.alerts).toEqual(defaultConfig.alerts);
+  });
+
+  test("--notify / --no-notify override the default", async () => {
+    const on = await load(["--notify"]);
+    expect(Either.isRight(on)).toBe(true);
+    if (Either.isRight(on)) expect(on.right.alerts.notify).toBe(true);
+
+    const off = await load(["--no-notify"]);
+    expect(Either.isRight(off)).toBe(true);
+    if (Either.isRight(off)) expect(off.right.alerts.notify).toBe(false);
+  });
+
+  test("a config file can override individual alert thresholds", async () => {
+    const path = await writeTmp(
+      JSON.stringify({ alerts: { cpu: { warn: 50 }, disk: { critical: 200 } } }),
+    );
+    const result = await load(["--config", path]);
+    expect(Either.isRight(result)).toBe(true);
+    if (Either.isRight(result)) {
+      const cfg = result.right;
+      expect(cfg.alerts.cpu).toEqual({ warn: 50, critical: defaultConfig.alerts.cpu.critical });
+      expect(cfg.alerts.disk).toEqual({ warn: defaultConfig.alerts.disk.warn, critical: 200 });
+      expect(cfg.alerts.memory).toEqual(defaultConfig.alerts.memory); // untouched
+    }
+  });
+
+  test("fails when an alert warn threshold exceeds critical", async () => {
+    const path = await writeTmp(
+      JSON.stringify({ alerts: { cpu: { warn: 95, critical: 90 } } }),
+    );
+    await expectConfigError(["--config", path], /invalid configuration/);
+  });
+
+  test("fails when a cpu/memory alert threshold is out of the 0-100 percent range", async () => {
+    const path = await writeTmp(JSON.stringify({ alerts: { memory: { critical: 150 } } }));
+    await expectConfigError(["--config", path], /invalid configuration/);
+  });
+
+  test("a disk alert threshold above 100 is valid (MB/s has no percent ceiling)", async () => {
+    const path = await writeTmp(JSON.stringify({ alerts: { disk: { warn: 500, critical: 1000 } } }));
+    const result = await load(["--config", path]);
+    expect(Either.isRight(result)).toBe(true);
+    if (Either.isRight(result)) {
+      expect(result.right.alerts.disk).toEqual({ warn: 500, critical: 1000 });
+    }
+  });
 });
