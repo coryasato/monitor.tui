@@ -109,6 +109,10 @@ Collector Fiber → Stream<MetricSnapshot> → MetricsStore (Ref) → UI compone
 - OpenTUI GitHub: https://github.com/anomalyco/opentui
 - Effect.ts Docs: https://effect.website
 - Effect Patterns: https://github.com/PaulJPhilp/EffectPatterns
+- `PLAN.md` — roadmap/backlog for this project. `ARCHITECTURE.md` — implementation
+  seams and shipped-feature gotchas for completed work; read it before touching
+  the process table, input routing, the redraw contract, focus/launch/exit flow,
+  or alerts.
 
 ## APIs
 
